@@ -12,10 +12,13 @@ LeRobot v2.1 数据集可视化编辑器
 """
 
 import json
+import os
 import shutil
 import logging
 import argparse
+import subprocess
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Flask, render_template, request, jsonify, send_file, abort
 import pandas as pd
@@ -69,6 +72,7 @@ class DatasetEditor:
         self.episode_data = {}          # ep_idx -> pd.DataFrame
         self._orig_indices = {}         # current_ep_idx -> original_ep_idx
         self._orig_video_files = {}     # original_ep_idx -> {cam_name: abs_path}
+        self._orig_ep_lengths = {}      # original_ep_idx -> 原始帧数
         self.modified = False
         self._load()
 
@@ -125,8 +129,13 @@ class DatasetEditor:
             if ep_idx is not None:
                 try:
                     df = pd.read_parquet(pq_file)
+                    if "frame_index" in df.columns:
+                        df["_orig_frame_idx"] = df["frame_index"].copy()
+                    else:
+                        df["_orig_frame_idx"] = range(len(df))
                     self.episode_data[ep_idx] = df
                     self._orig_indices[ep_idx] = ep_idx
+                    self._orig_ep_lengths[ep_idx] = len(df)
                 except Exception as e:
                     log.warning(f"读取 {pq_file} 失败: {e}")
 
@@ -253,6 +262,129 @@ class DatasetEditor:
                 return []
         return []
 
+    # ─── 视频处理 ───
+
+    @staticmethod
+    def _compress_int_ranges(sorted_indices):
+        """将有序整数列表压缩为连续区间: [0,1,2,5,6] -> [(0,2),(5,6)]"""
+        if not sorted_indices:
+            return []
+        ranges = []
+        start = end = sorted_indices[0]
+        for i in range(1, len(sorted_indices)):
+            if sorted_indices[i] == end + 1:
+                end = sorted_indices[i]
+            else:
+                ranges.append((start, end))
+                start = end = sorted_indices[i]
+        ranges.append((start, end))
+        return ranges
+
+    @staticmethod
+    def _probe_video_params(src_path):
+        """用 ffprobe 获取源视频的编码参数, 用于输出格式匹配。"""
+        params = {}
+        try:
+            r = subprocess.run([
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", "-select_streams", "v:0",
+                str(src_path),
+            ], capture_output=True, timeout=30)
+            if r.returncode == 0:
+                streams = json.loads(r.stdout).get("streams", [])
+                if streams:
+                    s = streams[0]
+                    params.update({
+                        "codec": s.get("codec_name", "h264"),
+                        "pix_fmt": s.get("pix_fmt", "yuv420p"),
+                        "bit_rate": s.get("bit_rate"),
+                        "profile": s.get("profile"),
+                    })
+        except Exception:
+            pass
+
+        # 探测关键帧间隔: 读取前 60 帧, 计算相邻 I 帧之间的最大距离
+        try:
+            r2 = subprocess.run([
+                "ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                "-show_entries", "frame=key_frame", "-of", "csv=p=0",
+                "-read_intervals", "%+#60",
+                str(src_path),
+            ], capture_output=True, timeout=30)
+            if r2.returncode == 0:
+                flags = r2.stdout.decode().strip().split("\n")
+                key_positions = [i for i, f in enumerate(flags) if f.strip() == "1"]
+                if len(key_positions) >= 2:
+                    max_gap = max(
+                        key_positions[i+1] - key_positions[i]
+                        for i in range(len(key_positions) - 1))
+                    params["keyint"] = max_gap
+        except Exception:
+            pass
+
+        return params
+
+    def _reencode_video(self, src_path, keep_frame_indices, dst_path,
+                        cached_params=None):
+        """用 ffmpeg select 滤镜重编码视频, 仅保留指定帧, 匹配源编码格式。
+        cached_params: 预先探测的编码参数, 避免重复 ffprobe。
+        """
+        if not Path(src_path).exists():
+            return False
+
+        params = cached_params or self._probe_video_params(src_path)
+        codec_name = params.get("codec", "h264")
+        pix_fmt = params.get("pix_fmt", "yuv420p")
+        bit_rate = params.get("bit_rate")
+        keyint = params.get("keyint", 2)
+
+        encoder_map = {
+            "h264": "libx264", "hevc": "libx265", "h265": "libx265",
+            "vp8": "libvpx", "vp9": "libvpx-vp9",
+            "av1": "libaom-av1",
+        }
+        encoder = encoder_map.get(codec_name, "libx264")
+
+        ranges = self._compress_int_ranges(sorted(keep_frame_indices))
+        parts = [f"between(n\\,{s}\\,{e})" for s, e in ranges]
+        select_expr = "+".join(parts)
+
+        cmd = [
+            "ffmpeg", "-y", "-i", str(src_path),
+            "-vf", f"select='{select_expr}',setpts=N/FRAME_RATE/TB",
+            "-c:v", encoder,
+            "-pix_fmt", pix_fmt,
+            "-g", str(keyint),
+        ]
+        if bit_rate:
+            cmd += ["-b:v", str(bit_rate)]
+        else:
+            cmd += ["-crf", "18"]
+        if encoder == "libx264":
+            cmd += ["-preset", "fast"]
+        elif encoder == "libaom-av1":
+            cmd += ["-cpu-used", "8", "-row-mt", "1"]
+        cmd += ["-movflags", "+faststart", "-an", dst_path]
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, timeout=600)
+            if result.returncode == 0:
+                return True
+            else:
+                stderr = result.stderr.decode(errors="replace")[:500]
+                log.warning(f"ffmpeg 重编码失败 {Path(dst_path).name}: {stderr}")
+                return False
+        except FileNotFoundError:
+            log.warning("ffmpeg 未安装, 无法裁剪视频; 请安装 ffmpeg")
+            return False
+        except subprocess.TimeoutExpired:
+            log.warning(f"ffmpeg 重编码超时: {dst_path}")
+            return False
+        except Exception as e:
+            log.warning(f"视频重编码异常: {e}")
+            return False
+
     # ─── 编辑 ───
 
     def delete_episodes(self, indices_to_delete):
@@ -287,7 +419,7 @@ class DatasetEditor:
         return len(new_meta)
 
     def delete_frames(self, ep_idx, frame_indices):
-        """删除 episode 中的指定帧 (同时删除对应 state, action)"""
+        """删除 episode 中的指定帧 (state, action, 视频帧在保存时统一裁剪)"""
         if ep_idx not in self.episode_data:
             return 0
 
@@ -406,17 +538,36 @@ class DatasetEditor:
             for s in ep_stats:
                 f.write(json.dumps(s, ensure_ascii=False) + "\n")
 
-        # ── Parquet 数据 ──
+        # ── Parquet 数据 + 收集视频任务 ──
         data_tpl = self.info.get(
             "data_path",
             "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet")
+        video_tpl = self.info.get("video_path", "")
         chunks_size = self.info.get("chunks_size", 1000)
+        features = self.info.get("features", {})
+        video_keys = [k for k in features if "images" in k]
+        fps = self.info.get("fps", 30)
+
+        encode_tasks = []   # (src_path, keep_indices, dst_path)
+        copy_tasks = []     # (src_path, dst_path)
 
         for em in self.episodes_meta:
             idx = em["episode_index"]
             if idx not in self.episode_data:
                 continue
+
+            df = self.episode_data[idx]
             chunk = idx // chunks_size
+            orig_idx = self._orig_indices.get(idx, idx)
+            orig_videos = self._orig_video_files.get(orig_idx, {})
+            orig_len = self._orig_ep_lengths.get(orig_idx, len(df))
+            frames_edited = (len(df) != orig_len)
+
+            # ── 保存 Parquet ──
+            save_df = df.drop(columns=["_orig_frame_idx"], errors="ignore")
+            if frames_edited:
+                save_df = save_df.copy()
+                save_df["timestamp"] = [i / fps for i in range(len(save_df))]
             try:
                 rel = data_tpl.format(
                     episode_chunk=chunk, chunk_index=chunk, episode_index=idx)
@@ -424,25 +575,14 @@ class DatasetEditor:
                 rel = f"data/chunk-{chunk:03d}/episode_{idx:06d}.parquet"
             pq_path = out / rel
             pq_path.parent.mkdir(parents=True, exist_ok=True)
-            self.episode_data[idx].to_parquet(pq_path, index=False)
+            save_df.to_parquet(pq_path, index=False)
 
-        # ── 视频 (从原始位置复制, 重命名) ──
-        video_tpl = self.info.get("video_path", "")
-        features = self.info.get("features", {})
-        video_keys = [k for k in features if "images" in k]
-
-        for em in self.episodes_meta:
-            idx = em["episode_index"]
-            orig_idx = self._orig_indices.get(idx, idx)
-            orig_videos = self._orig_video_files.get(orig_idx, {})
-            chunk_new = idx // chunks_size
-
+            # ── 收集视频任务 ──
             for cam_name, src_path_str in orig_videos.items():
                 src = Path(src_path_str)
                 if not src.exists():
                     continue
 
-                # 找到完整的 video key (如 observation.images.cam_high)
                 vkey = None
                 for k in video_keys:
                     if k.endswith(cam_name):
@@ -451,20 +591,61 @@ class DatasetEditor:
                 if vkey is None:
                     vkey = f"observation.images.{cam_name}"
 
-                # 构建目标路径
                 if video_tpl:
                     try:
                         dst_rel = video_tpl.format(
-                            episode_chunk=chunk_new, chunk_index=chunk_new,
+                            episode_chunk=chunk, chunk_index=chunk,
                             video_key=vkey, episode_index=idx)
                     except KeyError:
-                        dst_rel = f"videos/chunk-{chunk_new:03d}/{vkey}/episode_{idx:06d}.mp4"
+                        dst_rel = f"videos/chunk-{chunk:03d}/{vkey}/episode_{idx:06d}.mp4"
                 else:
-                    dst_rel = f"videos/chunk-{chunk_new:03d}/{vkey}/episode_{idx:06d}.mp4"
+                    dst_rel = f"videos/chunk-{chunk:03d}/{vkey}/episode_{idx:06d}.mp4"
 
                 dst = out / dst_rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
+
+                if frames_edited:
+                    keep = [int(x) for x in df["_orig_frame_idx"].tolist()]
+                    encode_tasks.append((src_path_str, keep, str(dst)))
+                else:
+                    copy_tasks.append((str(src), str(dst)))
+
+        # ── 直接复制未修改的视频 ──
+        for src, dst in copy_tasks:
+            shutil.copy2(src, dst)
+        log.info(f"已复制 {len(copy_tasks)} 个未修改视频")
+
+        # ── 多线程并行重编码修改过的视频 ──
+        if encode_tasks:
+            src_params = self._probe_video_params(encode_tasks[0][0])
+            workers = min(len(encode_tasks), max(1, (os.cpu_count() or 4) // 2))
+            log.info(
+                f"开始视频重编码: {len(encode_tasks)} 个视频, "
+                f"{workers} 路并行 (codec={src_params.get('codec','?')} "
+                f"keyint={src_params.get('keyint','?')})")
+
+            failed = 0
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                future_map = {
+                    pool.submit(
+                        self._reencode_video, src, keep, dst, src_params
+                    ): (src, dst)
+                    for src, keep, dst in encode_tasks
+                }
+                for i, future in enumerate(as_completed(future_map), 1):
+                    src, dst = future_map[future]
+                    try:
+                        ok = future.result()
+                    except Exception as e:
+                        log.warning(f"编码异常: {e}")
+                        ok = False
+                    if not ok:
+                        shutil.copy2(src, dst)
+                        failed += 1
+                    log.info(f"视频编码进度: {i}/{len(encode_tasks)}")
+
+            if failed:
+                log.warning(f"{failed} 个视频重编码失败, 已回退复制原始文件")
 
         self.modified = False
         log.info(f"数据集已保存到: {out}")
@@ -529,7 +710,6 @@ def api_video():
         abort(400)
     path = request.args.get("path", "")
     p = Path(path).resolve()
-    # 安全检查: 确保路径在原始数据集根目录下
     try:
         p.relative_to(_editor.original_root)
     except ValueError:

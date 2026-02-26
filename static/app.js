@@ -120,7 +120,13 @@ function videoStep(d) {
 }
 
 function videoSync() {
-    const fps=S.dataset?S.dataset.fps:30, t=S.videoFrame/fps;
+    const fps=S.dataset?S.dataset.fps:30;
+    let t;
+    if (S.curEpData && S.curEpData.frames && S.videoFrame < S.curEpData.frames.length) {
+        t = S.curEpData.frames[S.videoFrame].timestamp;
+    } else {
+        t = S.videoFrame / fps;
+    }
     for (const v of getVids()) v.currentTime=t;
     const sl=$('vs'); if(sl) sl.value=S.videoFrame;
     const lb=$('vfl'); if(lb) lb.textContent=`${S.videoFrame} / ${Math.max(0,S.videoTotalFrames-1)}`;
