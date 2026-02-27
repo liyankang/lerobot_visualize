@@ -16,6 +16,7 @@ import os
 import shutil
 import logging
 import argparse
+import shlex
 import subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -350,7 +351,7 @@ class DatasetEditor:
         select_expr = "+".join(parts)
 
         cmd = [
-            "ffmpeg", "-y", "-i", str(src_path),
+            "ffmpeg", "-hide_banner", "-y", "-i", str(src_path),
             "-vf", f"select='{select_expr}',setpts=N/FRAME_RATE/TB",
             "-c:v", encoder,
             "-pix_fmt", pix_fmt,
@@ -359,6 +360,9 @@ class DatasetEditor:
         if bit_rate:
             cmd += ["-b:v", str(bit_rate)]
         else:
+            # libaom-av1 的 CRF 模式通常需要显式设置 -b:v 0，否则可能直接报错退出
+            if encoder == "libaom-av1":
+                cmd += ["-b:v", "0"]
             cmd += ["-crf", "18"]
         if encoder == "libx264":
             cmd += ["-preset", "fast"]
