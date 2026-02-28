@@ -342,7 +342,7 @@ class DatasetEditor:
         encoder_map = {
             "h264": "libx264", "hevc": "libx265", "h265": "libx265",
             "vp8": "libvpx", "vp9": "libvpx-vp9",
-            "av1": "libaom-av1",
+            "av1": "libx264",
         }
         encoder = encoder_map.get(codec_name, "libx264")
 
@@ -360,14 +360,9 @@ class DatasetEditor:
         if bit_rate:
             cmd += ["-b:v", str(bit_rate)]
         else:
-            # libaom-av1 的 CRF 模式通常需要显式设置 -b:v 0，否则可能直接报错退出
-            if encoder == "libaom-av1":
-                cmd += ["-b:v", "0"]
             cmd += ["-crf", "18"]
         if encoder == "libx264":
             cmd += ["-preset", "fast"]
-        elif encoder == "libaom-av1":
-            cmd += ["-cpu-used", "8", "-row-mt", "1"]
         cmd += ["-movflags", "+faststart", "-an", dst_path]
 
         try:
@@ -452,56 +447,83 @@ class DatasetEditor:
 
     # ─── 统计 ───
 
-    def compute_stats(self):
-        """计算全局 mean / std / min / max"""
-        collector = {}
-        for df in self.episode_data.values():
-            for col in ("observation.state", "action"):
-                if col not in df.columns:
-                    continue
-                vals = df[col].tolist()
-                valid = [self._to_list(v) for v in vals if v is not None]
-                valid = [v for v in valid if len(v) > 0]
-                if valid:
-                    collector.setdefault(col, []).extend(valid)
-
-        stats = {}
-        for col, data in collector.items():
-            arr = np.array(data, dtype=np.float64)
-            if arr.ndim == 2 and arr.shape[0] > 0:
-                stats[col] = {
-                    "mean": arr.mean(0).tolist(),
-                    "std":  arr.std(0).tolist(),
-                    "min":  arr.min(0).tolist(),
-                    "max":  arr.max(0).tolist(),
-                    "count": int(arr.shape[0]),
-                }
-        return stats
+    @staticmethod
+    def _compute_feature_stats(arr):
+        """对 2D array (N, D) 或 1D array (N,) 计算统计量，返回 list 格式。"""
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        return {
+            "min":  arr.min(0).tolist(),
+            "max":  arr.max(0).tolist(),
+            "mean": arr.mean(0).tolist(),
+            "std":  arr.std(0).tolist(),
+            "count": [int(arr.shape[0])],
+        }
 
     def compute_episode_stats(self):
-        """计算每个 episode 的统计数据"""
+        """计算每个 episode 的统计数据 (lerobot v2.1 格式)"""
+        vector_cols = [c for c in ("observation.state", "action")
+                       if any(c in df.columns for df in self.episode_data.values())]
+        scalar_cols = [c for c in ("timestamp", "frame_index", "episode_index",
+                                    "index", "task_index")
+                       if any(c in df.columns for df in self.episode_data.values())]
+
         results = []
         for em in self.episodes_meta:
             idx = em["episode_index"]
             if idx not in self.episode_data:
                 continue
             df = self.episode_data[idx]
-            s = {"episode_index": idx}
-            for col in ("observation.state", "action"):
+            stats = {}
+
+            for col in vector_cols:
                 if col not in df.columns:
                     continue
                 vals = [self._to_list(v) for v in df[col].tolist() if v is not None]
                 valid = [v for v in vals if len(v) > 0]
                 if valid:
-                    arr = np.array(valid, dtype=np.float64)
-                    s[col] = {
-                        "mean": arr.mean(0).tolist(),
-                        "std":  arr.std(0).tolist(),
-                        "min":  arr.min(0).tolist(),
-                        "max":  arr.max(0).tolist(),
-                    }
-            results.append(s)
+                    stats[col] = self._compute_feature_stats(
+                        np.array(valid, dtype=np.float64))
+
+            for col in scalar_cols:
+                if col not in df.columns:
+                    continue
+                arr = df[col].dropna().values.astype(np.float64)
+                if len(arr) > 0:
+                    stats[col] = self._compute_feature_stats(arr)
+
+            results.append({"episode_index": idx, "stats": stats})
         return results
+
+    def compute_stats(self):
+        """基于 episode stats 聚合全局统计 (lerobot aggregate_stats 公式)"""
+        ep_stats_list = self.compute_episode_stats()
+        all_keys = {}
+        for es in ep_stats_list:
+            for k in es["stats"]:
+                all_keys.setdefault(k, []).append(es["stats"][k])
+
+        global_stats = {}
+        for key, stats_list in all_keys.items():
+            mins   = np.array([s["min"]  for s in stats_list])
+            maxs   = np.array([s["max"]  for s in stats_list])
+            means  = np.array([s["mean"] for s in stats_list])
+            stds   = np.array([s["std"]  for s in stats_list])
+            counts = np.array([s["count"][0] for s in stats_list]).reshape(-1, 1)
+
+            total_count = counts.sum()
+            total_mean = (means * counts).sum(0) / total_count
+            total_var = ((stds ** 2 + (means - total_mean) ** 2) * counts).sum(0) / total_count
+            total_std = np.sqrt(np.maximum(0, total_var))
+
+            global_stats[key] = {
+                "min":  mins.min(0).tolist(),
+                "max":  maxs.max(0).tolist(),
+                "mean": total_mean.tolist(),
+                "std":  total_std.tolist(),
+                "count": [int(total_count)],
+            }
+        return global_stats, ep_stats_list
 
     # ─── 保存 ───
 
@@ -531,18 +553,7 @@ class DatasetEditor:
             for t in self.tasks:
                 f.write(json.dumps(t, ensure_ascii=False) + "\n")
 
-        # ── stats.json (全局统计) ──
-        stats = self.compute_stats()
-        with open(meta_dir / "stats.json", "w") as f:
-            json.dump(stats, f, indent=2, ensure_ascii=False)
-
-        # ── episodes_stats.jsonl (逐 episode 统计) ──
-        ep_stats = self.compute_episode_stats()
-        with open(meta_dir / "episodes_stats.jsonl", "w") as f:
-            for s in ep_stats:
-                f.write(json.dumps(s, ensure_ascii=False) + "\n")
-
-        # ── Parquet 数据 + 收集视频任务 ──
+        # ── 修正数据列 (timestamp, index) 以保证统计和 Parquet 一致 ──
         data_tpl = self.info.get(
             "data_path",
             "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet")
@@ -552,6 +563,29 @@ class DatasetEditor:
         video_keys = [k for k in features if "images" in k]
         fps = self.info.get("fps", 30)
 
+        global_idx = 0
+        for em in self.episodes_meta:
+            idx = em["episode_index"]
+            if idx not in self.episode_data:
+                continue
+            df = self.episode_data[idx]
+            orig_idx = self._orig_indices.get(idx, idx)
+            orig_len = self._orig_ep_lengths.get(orig_idx, len(df))
+            if len(df) != orig_len:
+                df["timestamp"] = [i / fps for i in range(len(df))]
+            if "index" in df.columns:
+                df["index"] = range(global_idx, global_idx + len(df))
+            global_idx += len(df)
+
+        # ── stats.json + episodes_stats.jsonl ──
+        global_stats, ep_stats = self.compute_stats()
+        with open(meta_dir / "stats.json", "w") as f:
+            json.dump(global_stats, f, indent=2, ensure_ascii=False)
+        with open(meta_dir / "episodes_stats.jsonl", "w") as f:
+            for s in ep_stats:
+                f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+        # ── Parquet 数据 + 收集视频任务 ──
         encode_tasks = []   # (src_path, keep_indices, dst_path)
         copy_tasks = []     # (src_path, dst_path)
 
@@ -569,9 +603,6 @@ class DatasetEditor:
 
             # ── 保存 Parquet ──
             save_df = df.drop(columns=["_orig_frame_idx"], errors="ignore")
-            if frames_edited:
-                save_df = save_df.copy()
-                save_df["timestamp"] = [i / fps for i in range(len(save_df))]
             try:
                 rel = data_tpl.format(
                     episode_chunk=chunk, chunk_index=chunk, episode_index=idx)
