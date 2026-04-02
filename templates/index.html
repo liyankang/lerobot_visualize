@@ -174,6 +174,66 @@
         .rt button { background:none; border:none; color:#c0392b; cursor:pointer; font-size:13px; padding:0 1px; font-weight:bold; }
         .ht { color:#aaa; font-size:11px; }
 
+        /* ── Analysis Modal ── */
+        .modal-overlay {
+            position:fixed; inset:0; z-index:10000;
+            background:rgba(0,0,0,0.5); display:flex;
+            align-items:center; justify-content:center;
+            animation: modalFadeIn .15s;
+        }
+        @keyframes modalFadeIn { from{opacity:0} to{opacity:1} }
+        .modal-card {
+            background:#fff; border-radius:10px; width:560px; max-width:92vw;
+            max-height:80vh; display:flex; flex-direction:column;
+            box-shadow:0 8px 32px rgba(0,0,0,0.3);
+        }
+        .modal-hdr {
+            display:flex; align-items:center; justify-content:space-between;
+            padding:14px 18px; border-bottom:1px solid #eee;
+        }
+        .modal-hdr h3 { font-size:15px; color:#e74c3c; margin:0; }
+        .modal-close {
+            background:none; border:none; font-size:22px; cursor:pointer;
+            color:#999; padding:0 4px; line-height:1;
+        }
+        .modal-close:hover { color:#333; }
+        .modal-body { padding:14px 18px; overflow-y:auto; flex:1; }
+        .modal-footer {
+            padding:12px 18px; border-top:1px solid #eee;
+            display:flex; gap:8px; justify-content:flex-end;
+        }
+        .aj-section, .arec-section { margin-bottom:14px; }
+        .aj-section h4, .arec-section h4 {
+            font-size:12px; color:#666; margin-bottom:8px;
+            text-transform:uppercase; letter-spacing:0.5px;
+        }
+        .aj-item {
+            background:#fef5f5; border-left:3px solid #e74c3c;
+            padding:6px 10px; margin-bottom:6px;
+            border-radius:0 4px 4px 0; font-size:12px;
+        }
+        .aj-range { font-weight:600; }
+        .aj-info { color:#888; margin-left:8px; }
+        .aj-joints { display:block; color:#c0392b; font-size:11px; margin-top:2px; }
+        .arec {
+            background:#f8f9fa; border-radius:6px;
+            padding:10px 14px; margin-bottom:8px;
+        }
+        .arec-title { font-weight:600; font-size:13px; margin-bottom:4px; }
+        .arec p { font-size:11px; color:#666; margin-bottom:6px; }
+        .arec-frames { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:8px; }
+        .af-tag {
+            padding:2px 8px; border-radius:10px;
+            font-size:11px; font-weight:500;
+        }
+        .af-bridge { background:#d5f5e3; color:#1e8449; }
+        .af-filter { background:#d6eaf8; color:#2471a3; }
+        .arec-tag-pri {
+            background:#27ae60; color:#fff; padding:1px 6px;
+            border-radius:8px; font-size:10px; font-weight:400; margin-left:6px;
+        }
+        .arec-warn { background:#fef9e7; border:1px solid #f9e79f; }
+
         /* ── Toast ── */
         #tb { position:fixed; top:48px; right:12px; z-index:9999; display:flex; flex-direction:column; gap:4px; pointer-events:none; }
         .tt { padding:7px 14px; border-radius:5px; font-size:12px; color:#fff; box-shadow:0 2px 6px rgba(0,0,0,0.2); animation:fs .2s; pointer-events:auto; }

@@ -8,6 +8,7 @@ const S = {
     chartMode: 'both',      // 'both' | 'state' | 'action'
     videoPlaying: false, videoFrame: 0, videoTotalFrames: 0, videoTimer: null,
     chartClickState: 0,     // 0=空闲, 1=等待结束帧
+    bridgePreview: [],      // 桥接帧预览 (分析模态框打开时高亮)
 };
 
 const COLORS = [
@@ -68,17 +69,121 @@ async function doDeleteFrames() {
     const fr = Array.from(S.selFrames).sort((a,b)=>a-b);
     if (!fr.length) return toast('请先选择要删除的片段','error');
     if (S.curEp===null) return;
-    const rng = compressRanges(fr);
+
+    toast('正在分析平滑性...','info');
+    try {
+        const activeIdx = Array.from(S.activeJoints)
+            .map(j => S.jointNames.indexOf(j)).filter(i => i >= 0);
+        const analysis = await post('/api/analyze_deletion', {
+            episode_index: S.curEp, frame_indices: fr,
+            active_joint_indices: activeIdx.length ? activeIdx : null
+        });
+        if (analysis.smooth) {
+            await executeDelete(fr);
+        } else {
+            showAnalysisModal(analysis, fr);
+        }
+    } catch(e) {
+        await executeDelete(fr);
+    }
+}
+
+async function executeDelete(framesToDelete, keepFrames=[]) {
+    const actual = keepFrames.length > 0
+        ? framesToDelete.filter(f => !keepFrames.includes(f))
+        : framesToDelete;
+    if (!actual.length) { toast('没有需要删除的帧','info'); return; }
+
+    const rng = compressRanges(actual.sort((a,b)=>a-b));
     const rs = rng.map(([s,e])=>s===e?`帧${s}`:`帧${s}-${e}`).join(', ');
-    if (!confirm(`从 Ep ${S.curEp} 删除 ${fr.length} 帧?\n\n${rs}`)) return;
-    if (!confirm('⚠ 二次确认: 帧索引重编号, state/action 一并删除。确认?')) return;
+    let msg = `从 Ep ${S.curEp} 删除 ${actual.length} 帧?\n\n${rs}`;
+    if (keepFrames.length > 0) msg += `\n\n(保留桥接帧: ${keepFrames.join(', ')})`;
+    if (!confirm(msg)) return;
+
     videoPause();
-    const d = await post('/api/delete_frames',{episode_index:S.curEp,frame_indices:fr});
+    const d = await post('/api/delete_frames',{episode_index:S.curEp,frame_indices:actual});
     S.episodes=d.episodes; S.dataset=d.summary; S.selFrames.clear(); S.chartClickState=0;
     if (d.episode_data) { S.curEpData=d.episode_data; renderEpDetail(d.episode_data); }
     else { S.curEp=null; S.curEpData=null; hideDetail(); }
     renderSummary(); renderEpList();
-    toast(`已删除 ${fr.length} 帧, 剩余 ${d.remaining_frames}`,'success');
+    toast(`已删除 ${actual.length} 帧, 剩余 ${d.remaining_frames}`,'success');
+}
+
+function showAnalysisModal(analysis, originalFrames) {
+    const rec = analysis.recommendation || {};
+    const alt = analysis.alternative;
+
+    S.bridgePreview = rec.frames || [];
+    refreshChart();
+
+    let jHTML = '';
+    for (const j of (analysis.junctions || [])) {
+        const joints = (j.problematic_joints || [])
+            .map(ji => S.jointNames[ji] || `关节${ji}`).slice(0, 5);
+        jHTML += `<div class="aj-item">
+            <span class="aj-range">帧 ${j.left_frame} ↔ 帧 ${j.right_frame}</span>
+            <span class="aj-info">跨越 ${j.deleted_count} 帧 · 加速度超标 ${j.max_accel_ratio}×</span>
+            ${joints.length ? `<span class="aj-joints">受影响: ${joints.join(', ')}</span>` : ''}
+        </div>`;
+    }
+
+    let rHTML = '';
+    if (rec.method === 'bridge' && rec.frames && rec.frames.length) {
+        rHTML += `<div class="arec">
+            <div class="arec-title">方案一: 保留桥接帧 <span class="arec-tag-pri">推荐</span></div>
+            <p>通过递归二分法找到的最优桥接帧，保留这些真实帧使轨迹平滑过渡</p>
+            <div class="arec-frames">${rec.frames.map(f=>`<span class="af-tag af-bridge">帧 ${f}</span>`).join('')}</div>
+            <button class="bp" onclick="applyRecommendation(${JSON.stringify(rec.frames)},${JSON.stringify(originalFrames)})">采用此方案</button>
+        </div>`;
+        if (alt && alt.frames && alt.frames.length) {
+            rHTML += `<div class="arec">
+                <div class="arec-title">方案二: 滤波插值匹配</div>
+                <p>通过滤波生成平滑参考轨迹，匹配最接近理想值的真实帧</p>
+                <div class="arec-frames">${alt.frames.map(f=>`<span class="af-tag af-filter">帧 ${f}</span>`).join('')}</div>
+                <button class="bp" onclick="applyRecommendation(${JSON.stringify(alt.frames)},${JSON.stringify(originalFrames)})">采用此方案</button>
+            </div>`;
+        }
+    } else if (rec.method === 'filter' && rec.frames && rec.frames.length) {
+        rHTML += `<div class="arec">
+            <div class="arec-title">方案: 滤波插值匹配</div>
+            <p>未找到理想桥接帧，通过滤波生成平滑参考轨迹，匹配最接近理想值的真实帧</p>
+            <div class="arec-frames">${rec.frames.map(f=>`<span class="af-tag af-filter">帧 ${f}</span>`).join('')}</div>
+            <button class="bp" onclick="applyRecommendation(${JSON.stringify(rec.frames)},${JSON.stringify(originalFrames)})">采用此方案</button>
+        </div>`;
+    } else {
+        rHTML += `<div class="arec arec-warn"><p>未找到合适的过渡帧，建议减小删除范围或直接强制删除</p></div>`;
+    }
+
+    const html = `<div class="modal-overlay" id="analysis-modal" onclick="if(event.target===this)closeAnalysisModal()">
+        <div class="modal-card">
+            <div class="modal-hdr"><h3>平滑性分析结果</h3><button class="modal-close" onclick="closeAnalysisModal()">×</button></div>
+            <div class="modal-body">
+                <div class="aj-section"><h4>检测到不连续拼接点</h4>${jHTML}</div>
+                <div class="arec-section"><h4>建议方案</h4>${rHTML}</div>
+            </div>
+            <div class="modal-footer">
+                <button class="bd" onclick="forceDeleteAll(${JSON.stringify(originalFrames)})">强制全部删除</button>
+                <button class="bg" onclick="closeAnalysisModal()">取消</button>
+            </div>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function closeAnalysisModal() {
+    S.bridgePreview = []; refreshChart();
+    const m = document.getElementById('analysis-modal');
+    if (m) m.remove();
+}
+
+async function applyRecommendation(keepFrames, allFrames) {
+    closeAnalysisModal();
+    await executeDelete(allFrames, keepFrames);
+}
+
+async function forceDeleteAll(frames) {
+    closeAnalysisModal();
+    await executeDelete(frames);
 }
 
 async function doSave() {
@@ -272,6 +377,17 @@ const chartOverlay = {
                 const p1=x.getPixelForValue(s-0.4), p2=x.getPixelForValue(e+0.4);
                 ctx.fillRect(p1,top,p2-p1,bottom-top); ctx.strokeRect(p1,top,p2-p1,bottom-top);
             }
+        }
+        // 桥接帧预览 (绿色虚线)
+        if (S.bridgePreview && S.bridgePreview.length>0) {
+            ctx.strokeStyle='rgba(39,174,96,0.85)'; ctx.lineWidth=2.5; ctx.setLineDash([4,3]);
+            for (const f of S.bridgePreview) {
+                const px=x.getPixelForValue(f);
+                if (px>=left&&px<=right) {
+                    ctx.beginPath(); ctx.moveTo(px,top); ctx.lineTo(px,bottom); ctx.stroke();
+                }
+            }
+            ctx.setLineDash([]);
         }
         // 播放位置指示线
         if (S.videoTotalFrames>0&&S.curEpData) {

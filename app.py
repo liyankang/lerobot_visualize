@@ -25,6 +25,12 @@ from flask import Flask, render_template, request, jsonify, send_file, abort
 import pandas as pd
 import numpy as np
 
+try:
+    from scipy.signal import butter, filtfilt
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+
 # ═══════════════════════ 配置 ═══════════════════════
 
 app = Flask(__name__)
@@ -445,6 +451,323 @@ class DatasetEditor:
         self.info["total_episodes"] = len(self.episodes_meta)
         self.info["total_frames"] = sum(len(d) for d in self.episode_data.values())
 
+    # ─── 平滑性分析 ───
+
+    def _get_state_array(self, ep_idx):
+        """提取 observation.state 为 2D numpy 数组 (N, D)"""
+        if ep_idx not in self.episode_data:
+            return None
+        df = self.episode_data[ep_idx]
+        if "observation.state" not in df.columns:
+            return None
+        raw = [self._to_list(v) for v in df["observation.state"].tolist()]
+        if not raw or not all(len(v) > 0 for v in raw):
+            return None
+        return np.array(raw, dtype=np.float64)
+
+    def _find_junctions(self, n_frames, del_set):
+        """找出删除后产生的所有拼接点: (左锚帧, 右锚帧, 被删帧列表)"""
+        remaining = sorted(set(range(n_frames)) - del_set)
+        junctions = []
+        for i in range(len(remaining) - 1):
+            left, right = remaining[i], remaining[i + 1]
+            if right > left + 1:
+                between = sorted(
+                    f for f in range(left + 1, right) if f in del_set)
+                if between:
+                    junctions.append((left, right, between))
+        return junctions
+
+    def _compute_accel_threshold(self, states, k_sigma=3.0):
+        """从整条轨迹计算每个关节维度的加速度阈值 (鲁棒统计: median + k*MAD)
+
+        使用全量数据 + 鲁棒统计, 使阈值不随删除选择而波动.
+        MAD (Median Absolute Deviation) 对异常值不敏感.
+        """
+        n = len(states)
+        if n < 3:
+            return None
+        all_accel = np.abs(np.diff(states, n=2, axis=0))
+        if len(all_accel) == 0:
+            return None
+        median_acc = np.median(all_accel, axis=0)
+        mad = np.median(np.abs(all_accel - median_acc), axis=0)
+        return np.maximum(median_acc + k_sigma * 1.4826 * mad, 1e-6)
+
+    def _is_splice_smooth(self, states, left, right, threshold,
+                          val_floor=0.0):
+        """双条件检测: 加速度异常 且 值变化显著 才判定为不平滑
+        val_floor: 每关节位置变化绝对值低于此值时视为无意义, 跳过该关节
+
+        注意: 删除帧后 left 和 right 在编辑时间线中直接相邻,
+        因此拼接速度 = states[right] - states[left] (不做 gap 归一化).
+        """
+        n = len(states)
+        v_splice = states[right] - states[left]
+        significant = np.abs(v_splice) > val_floor
+        if left >= 1:
+            v_before = states[left] - states[left - 1]
+            accel_bad = np.abs(v_splice - v_before) > threshold
+            if np.any(accel_bad & significant):
+                return False
+        if right < n - 1:
+            v_after = states[right + 1] - states[right]
+            accel_bad = np.abs(v_after - v_splice) > threshold
+            if np.any(accel_bad & significant):
+                return False
+        return True
+
+    def _splice_accel_ratio(self, states, left, right, threshold,
+                            val_floor=0.0):
+        """计算拼接处各关节加速度比值, 值变化不显著的关节比值归零
+        比值上限 999 以免 UI 显示极端数字"""
+        n = len(states)
+        D = states.shape[1]
+        ratios = np.zeros(D)
+        safe_thr = np.maximum(threshold, 1e-10)
+        v_splice = states[right] - states[left]
+        significant = np.abs(v_splice) > val_floor
+        if left >= 1:
+            v_before = states[left] - states[left - 1]
+            r = np.abs(v_splice - v_before) / safe_thr
+            ratios = np.maximum(ratios, np.where(significant, r, 0.0))
+        if right < n - 1:
+            v_after = states[right + 1] - states[right]
+            r = np.abs(v_after - v_splice) / safe_thr
+            ratios = np.maximum(ratios, np.where(significant, r, 0.0))
+        return np.minimum(ratios, 999.0)
+
+    def _find_bridge_dp(self, states, left, right, candidates,
+                        dp_threshold, min_count=0):
+        """Douglas-Peucker 关键帧提取, 保证至少返回 min_count 个帧.
+
+        先用 dp_threshold 做标准 DP; 若结果不足 min_count,
+        则自动降低阈值 (取所有候选偏差的中位数) 重跑, 直至满足要求.
+        """
+        result = self._dp_recurse(states, left, right, candidates,
+                                  dp_threshold)
+        if len(result) >= min_count or not candidates:
+            return result
+
+        devs = []
+        span = max(right - left, 1)
+        for c in candidates:
+            t = (c - left) / span
+            interp = states[left] * (1 - t) + states[right] * t
+            devs.append(float(np.max(np.abs(states[c] - interp))))
+        devs.sort(reverse=True)
+
+        for attempt in range(3):
+            needed = min(min_count, len(candidates))
+            if needed <= len(result):
+                break
+            cut_idx = min(needed - 1, len(devs) - 1)
+            new_thr = devs[cut_idx] * 0.99
+            result = self._dp_recurse(states, left, right, candidates,
+                                      new_thr)
+            if len(result) >= needed:
+                break
+        return result
+
+    def _dp_recurse(self, states, left, right, candidates, dp_threshold):
+        """标准 Douglas-Peucker 递归"""
+        if not candidates:
+            return []
+        span = right - left
+        if span <= 1:
+            return []
+
+        max_dev = -1.0
+        pivot_idx = 0
+        for idx, c in enumerate(candidates):
+            t = (c - left) / span
+            interp = states[left] * (1 - t) + states[right] * t
+            dev = float(np.max(np.abs(states[c] - interp)))
+            if dev > max_dev:
+                max_dev = dev
+                pivot_idx = idx
+
+        if max_dev <= dp_threshold:
+            return []
+
+        pivot = candidates[pivot_idx]
+        left_cands = candidates[:pivot_idx]
+        right_cands = candidates[pivot_idx + 1:]
+
+        left_res = self._dp_recurse(
+            states, left, pivot, left_cands, dp_threshold)
+        right_res = self._dp_recurse(
+            states, pivot, right, right_cands, dp_threshold)
+        return left_res + [pivot] + right_res
+
+    def _find_bridge_by_filter(self, states, left, right, candidates,
+                               fps=30):
+        """通过平滑参考轨迹 + 相似度匹配寻找桥接帧
+        优先 Butterworth 滤波, 回退到 Hermite 三次插值"""
+        if not candidates:
+            return []
+
+        n = len(states)
+        D = states.shape[1]
+        span = right - left
+        if span <= 1:
+            return []
+
+        ideal_values = None
+
+        # 方案 A: Butterworth 低通滤波
+        if _HAS_SCIPY and n >= 12:
+            try:
+                nyq = fps / 2.0
+                cutoff = min(fps / 8.0, nyq * 0.9)
+                Wn = cutoff / nyq
+                b, a = butter(3, Wn, btype='low')
+                filtered = np.zeros_like(states)
+                for d in range(D):
+                    filtered[:, d] = filtfilt(b, a, states[:, d])
+                ideal_values = filtered[candidates]
+            except Exception:
+                ideal_values = None
+
+        # 方案 B: Hermite 三次插值
+        if ideal_values is None:
+            p0, p1 = states[left], states[right]
+            m0 = ((states[left] - states[max(0, left - 1)]) * span
+                   if left > 0 else np.zeros(D))
+            m1 = ((states[min(n - 1, right + 1)] - states[right]) * span
+                   if right < n - 1 else np.zeros(D))
+            ideal_values = np.zeros((len(candidates), D))
+            for i, c in enumerate(candidates):
+                t = (c - left) / span
+                t2, t3 = t * t, t * t * t
+                h00 = 2 * t3 - 3 * t2 + 1
+                h10 = t3 - 2 * t2 + t
+                h01 = -2 * t3 + 3 * t2
+                h11 = t3 - t2
+                ideal_values[i] = (h00 * p0 + h10 * m0
+                                   + h01 * p1 + h11 * m1)
+
+        # 按时间段分组, 每段选最接近理想值的真实帧
+        real_values = states[candidates]
+        distances = np.linalg.norm(real_values - ideal_values, axis=1)
+
+        K = max(2, 1 + len(candidates) // 3)
+        K = min(K, len(candidates))
+        if len(candidates) <= K:
+            return list(candidates)
+
+        selected = []
+        seg_len = len(candidates) / K
+        for seg_i in range(K):
+            lo = int(seg_i * seg_len)
+            hi = min(int((seg_i + 1) * seg_len), len(candidates))
+            if lo >= hi:
+                continue
+            best_idx = lo + int(np.argmin(distances[lo:hi]))
+            selected.append(candidates[best_idx])
+        return sorted(set(selected))
+
+    def analyze_deletion(self, ep_idx, frame_indices, k_sigma=3.0,
+                         joint_indices=None):
+        """分析删除帧后的平滑性, 返回桥接帧建议
+        joint_indices: 仅分析这些关节列索引 (来自前端关节选择面板)
+        """
+        states = self._get_state_array(ep_idx)
+        if states is None or len(states) < 4:
+            return {"smooth": True, "message": "数据不足，跳过分析"}
+
+        # 按前端选择过滤关节, 保留原始索引映射
+        if joint_indices is not None and len(joint_indices) > 0:
+            ji = [int(j) for j in joint_indices
+                  if 0 <= int(j) < states.shape[1]]
+            if not ji:
+                return {"smooth": True, "message": "选中关节无有效数据"}
+            joint_map = ji
+            states = states[:, ji]
+        else:
+            joint_map = list(range(states.shape[1]))
+
+        n = len(states)
+        del_set = set(frame_indices)
+        fps = self.info.get("fps", 30)
+
+        junctions = self._find_junctions(n, del_set)
+        if not junctions:
+            return {"smooth": True}
+
+        # 加速度阈值 (从整条轨迹的鲁棒统计量计算, 不随删除选择波动)
+        threshold = self._compute_accel_threshold(states, k_sigma)
+        if threshold is None:
+            return {"smooth": True, "message": "无法计算阈值"}
+
+        # Douglas-Peucker 阈值: 基于每帧平均绝对变化量 (用较低倍数以保留更多形状细节)
+        non_del = sorted(set(range(n)) - del_set)
+        if len(non_del) >= 2:
+            nd_states = states[non_del]
+            avg_abs_vel = np.mean(np.abs(np.diff(nd_states, axis=0)), axis=0)
+            dp_threshold = float(np.max(avg_abs_vel)) * 0.5
+        else:
+            dp_threshold = float(np.max(threshold))
+
+        # 值变化下限: 整体数据尺度的 0.1%
+        overall_scale = float(np.max(np.ptp(states, axis=0)))
+        val_floor = overall_scale * 0.001
+
+        problem_junctions = []
+        all_bridge, all_filter = [], []
+
+        for left, right, deleted in junctions:
+            if self._is_splice_smooth(states, left, right, threshold,
+                                      val_floor):
+                continue
+
+            ratios = self._splice_accel_ratio(states, left, right, threshold,
+                                              val_floor)
+            bad_joints = [joint_map[int(j)] for j in np.where(ratios > 1.0)[0]]
+            problem_junctions.append({
+                "left_frame": int(left),
+                "right_frame": int(right),
+                "deleted_count": len(deleted),
+                "max_accel_ratio": round(float(np.max(ratios)), 2),
+                "problematic_joints": bad_joints,
+            })
+
+            min_bridges = max(2, len(deleted) // 3)
+            bridges = self._find_bridge_dp(
+                states, left, right, deleted, dp_threshold, min_bridges)
+            all_bridge.extend(bridges)
+
+            filter_frames = self._find_bridge_by_filter(
+                states, left, right, deleted, fps)
+            all_filter.extend(filter_frames)
+
+        if not problem_junctions:
+            return {"smooth": True}
+
+        result = {"smooth": False, "junctions": problem_junctions}
+
+        if all_bridge:
+            result["recommendation"] = {
+                "method": "bridge",
+                "frames": sorted(set(all_bridge)),
+            }
+            if all_filter:
+                result["alternative"] = {
+                    "method": "filter",
+                    "frames": sorted(set(all_filter)),
+                }
+        elif all_filter:
+            result["recommendation"] = {
+                "method": "filter",
+                "frames": sorted(set(all_filter)),
+            }
+        else:
+            result["recommendation"] = {
+                "method": "none",
+                "frames": [],
+            }
+        return result
+
     # ─── 统计 ───
 
     @staticmethod
@@ -791,6 +1114,22 @@ def api_delete_frames():
         "episodes": _editor.get_episodes(),
         "summary": _editor.get_summary(),
     })
+
+
+@app.route("/api/analyze_deletion", methods=["POST"])
+def api_analyze_deletion():
+    if _editor is None:
+        return jsonify({"error": "未加载数据集"}), 400
+    data = request.get_json()
+    ep_idx = data.get("episode_index")
+    frame_indices = data.get("frame_indices", [])
+    if ep_idx is None or not frame_indices:
+        return jsonify({"error": "参数不完整"}), 400
+    k_sigma = data.get("k_sigma", 3.0)
+    active_joints = data.get("active_joint_indices")
+    result = _editor.analyze_deletion(
+        ep_idx, frame_indices, k_sigma, active_joints)
+    return jsonify(result)
 
 
 @app.route("/api/save", methods=["POST"])
