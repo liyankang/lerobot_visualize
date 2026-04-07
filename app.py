@@ -18,6 +18,7 @@ import logging
 import argparse
 import shlex
 import subprocess
+import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -39,6 +40,39 @@ log = logging.getLogger(__name__)
 
 # 全局编辑器实例
 _editor = None
+_save_progress_lock = threading.Lock()
+_save_progress = {
+    "active": False,
+    "stage": "idle",
+    "title": "空闲",
+    "detail": "",
+    "current": 0,
+    "total": 0,
+}
+
+
+def set_save_progress(stage, title, detail="", current=0, total=0, active=True):
+    with _save_progress_lock:
+        _save_progress.update({
+            "active": active,
+            "stage": stage,
+            "title": title,
+            "detail": detail,
+            "current": int(current),
+            "total": int(total),
+        })
+
+
+def get_save_progress():
+    with _save_progress_lock:
+        data = dict(_save_progress)
+    total = data.get("total", 0)
+    current = data.get("current", 0)
+    if total > 0:
+        data["percent"] = max(0, min(100, round(current * 100 / total)))
+    else:
+        data["percent"] = None
+    return data
 
 # 关节名称 (CR100 双臂灵巧手, 与 rosbag2lerobot 转换器一致)
 JOINT_GROUPS = {
@@ -69,6 +103,7 @@ for _g in ["left_arm", "left_hand", "right_arm", "right_hand"]:
 
 class DatasetEditor:
     """LeRobot v2.1 数据集的加载、编辑和保存"""
+    QUANTILES = (0.01, 0.10, 0.50, 0.90, 0.99)
 
     def __init__(self, dataset_path: str):
         self.root = Path(dataset_path).resolve()
@@ -199,7 +234,11 @@ class DatasetEditor:
 
     def get_summary(self):
         features = self.info.get("features", {})
-        cameras = [k.split(".")[-1] for k in features if "images" in k]
+        cameras = [
+            k.split(".")[-1]
+            for k, meta in features.items()
+            if meta.get("dtype") in ("image", "video")
+        ]
         return {
             "path": str(self.root),
             "fps": self.info.get("fps", 30),
@@ -306,6 +345,8 @@ class DatasetEditor:
                         "pix_fmt": s.get("pix_fmt", "yuv420p"),
                         "bit_rate": s.get("bit_rate"),
                         "profile": s.get("profile"),
+                        "width": int(s.get("width") or 0),
+                        "height": int(s.get("height") or 0),
                     })
         except Exception:
             pass
@@ -775,23 +816,203 @@ class DatasetEditor:
         """对 2D array (N, D) 或 1D array (N,) 计算统计量，返回 list 格式。"""
         if arr.ndim == 1:
             arr = arr.reshape(-1, 1)
-        return {
+        stats = {
             "min":  arr.min(0).tolist(),
             "max":  arr.max(0).tolist(),
             "mean": arr.mean(0).tolist(),
             "std":  arr.std(0).tolist(),
             "count": [int(arr.shape[0])],
         }
+        for q in DatasetEditor.QUANTILES:
+            stats[f"q{int(q * 100):02d}"] = np.quantile(arr, q, axis=0).tolist()
+        return stats
 
-    def compute_episode_stats(self):
+    @staticmethod
+    def _estimate_num_samples(dataset_len, min_num_samples=100,
+                              max_num_samples=10_000, power=0.75):
+        """按 lerobot 的启发式估计需要采样多少张图像。"""
+        if dataset_len <= 0:
+            return 0
+        if dataset_len < min_num_samples:
+            min_num_samples = dataset_len
+        return max(min_num_samples, min(int(dataset_len ** power), max_num_samples))
+
+    @classmethod
+    def _sample_frame_indices(cls, frame_count):
+        """在整段视频上均匀采样帧索引。"""
+        if frame_count <= 0:
+            return []
+        if frame_count == 1:
+            return [0]
+
+        num_samples = cls._estimate_num_samples(frame_count)
+        raw = np.round(np.linspace(0, frame_count - 1, num_samples)).astype(int).tolist()
+
+        sampled = []
+        seen = set()
+        for idx in raw:
+            idx = max(0, min(frame_count - 1, int(idx)))
+            if idx in seen:
+                continue
+            seen.add(idx)
+            sampled.append(idx)
+        return sampled
+
+    @staticmethod
+    def _read_exact(stream, size):
+        """从二进制流中读取固定字节数。"""
+        chunks = []
+        remaining = size
+        while remaining > 0:
+            chunk = stream.read(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _compute_image_feature_stats_from_video(self, video_path, frame_count):
+        """从视频中采样图像帧并计算每通道统计，结果对齐 lerobot 的 [3,1,1] 形状。"""
+        sampled_indices = self._sample_frame_indices(frame_count)
+        if not sampled_indices:
+            return None
+
+        params = self._probe_video_params(video_path)
+        width = int(params.get("width") or 0)
+        height = int(params.get("height") or 0)
+        if width <= 0 or height <= 0:
+            log.warning(f"无法获取视频尺寸，跳过图像统计: {video_path}")
+            return None
+
+        out_w, out_h = width, height
+        if max(width, height) >= 300:
+            downsample_factor = int(width / 150) if width > height else int(height / 150)
+            downsample_factor = max(downsample_factor, 1)
+            out_w = max(1, width // downsample_factor)
+            out_h = max(1, height // downsample_factor)
+
+        ranges = self._compress_int_ranges(sampled_indices)
+        parts = []
+        for start, end in ranges:
+            if start == end:
+                parts.append(f"eq(n\\,{start})")
+            else:
+                parts.append(f"between(n\\,{start}\\,{end})")
+        select_expr = "+".join(parts)
+        filters = [f"select='{select_expr}'"]
+        if out_w != width or out_h != height:
+            filters.append(f"scale={out_w}:{out_h}")
+
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-i", str(video_path),
+            "-vf", ",".join(filters),
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "pipe:1",
+        ]
+
+        proc = None
+        frame_size = out_w * out_h * 3
+        decoded_frames = 0
+        channel_batches = []
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            while True:
+                buf = self._read_exact(proc.stdout, frame_size)
+                if not buf:
+                    break
+                if len(buf) != frame_size:
+                    log.warning(f"读取视频帧不完整，跳过图像统计: {video_path}")
+                    return None
+
+                frame = np.frombuffer(buf, dtype=np.uint8).reshape(-1, 3).astype(np.float64)
+                frame /= 255.0
+                channel_batches.append(frame)
+                decoded_frames += 1
+
+            return_code = proc.wait(timeout=600)
+            if return_code != 0:
+                stderr = proc.stderr.read().decode(errors="replace")[:500]
+                log.warning(f"ffmpeg 读取图像统计失败 {Path(video_path).name}: {stderr}")
+                return None
+        except FileNotFoundError:
+            log.warning("ffmpeg 未安装，无法计算图像统计")
+            return None
+        except subprocess.TimeoutExpired:
+            if proc is not None:
+                proc.kill()
+            log.warning(f"图像统计超时: {video_path}")
+            return None
+        except Exception as e:
+            log.warning(f"图像统计异常 {video_path}: {e}")
+            return None
+        finally:
+            if proc is not None:
+                if proc.stdout:
+                    proc.stdout.close()
+                if proc.stderr:
+                    proc.stderr.close()
+
+        if decoded_frames == 0 or not channel_batches:
+            return None
+
+        pixels = np.concatenate(channel_batches, axis=0)
+        min_channels = pixels.min(axis=0)
+        max_channels = pixels.max(axis=0)
+        mean_channels = pixels.mean(axis=0)
+        std_channels = pixels.std(axis=0)
+
+        def to_image_stat_list(values):
+            return np.asarray(values, dtype=np.float64).reshape(3, 1, 1).tolist()
+
+        stats = {
+            "min": to_image_stat_list(min_channels),
+            "max": to_image_stat_list(max_channels),
+            "mean": to_image_stat_list(mean_channels),
+            "std": to_image_stat_list(std_channels),
+            "count": [int(decoded_frames)],
+        }
+        for q in self.QUANTILES:
+            stats[f"q{int(q * 100):02d}"] = to_image_stat_list(
+                np.quantile(pixels, q, axis=0)
+            )
+        return stats
+
+    def compute_episode_stats(self, video_paths_by_episode=None, progress_cb=None):
         """计算每个 episode 的统计数据 (lerobot v2.1 格式)"""
+        features = self.info.get("features", {})
         vector_cols = [c for c in ("observation.state", "action")
                        if any(c in df.columns for df in self.episode_data.values())]
         scalar_cols = [c for c in ("timestamp", "frame_index", "episode_index",
                                     "index", "task_index")
                        if any(c in df.columns for df in self.episode_data.values())]
+        image_cols = [
+            key for key, meta in features.items()
+            if meta.get("dtype") in ("image", "video")
+        ]
 
         results = []
+        valid_episodes = [
+            em["episode_index"] for em in self.episodes_meta
+            if em["episode_index"] in self.episode_data
+        ]
+        total_episodes = len(valid_episodes)
+        if progress_cb:
+            progress_cb(
+                "compute_stats",
+                "正在计算统计信息",
+                "正在汇总每个 episode 的数值与图像统计...",
+                0,
+                total_episodes,
+            )
         for em in self.episodes_meta:
             idx = em["episode_index"]
             if idx not in self.episode_data:
@@ -815,12 +1036,31 @@ class DatasetEditor:
                 if len(arr) > 0:
                     stats[col] = self._compute_feature_stats(arr)
 
+            if video_paths_by_episode:
+                ep_video_paths = video_paths_by_episode.get(idx, {})
+                for key in image_cols:
+                    video_path = ep_video_paths.get(key)
+                    if not video_path:
+                        continue
+                    image_stats = self._compute_image_feature_stats_from_video(
+                        video_path, len(df))
+                    if image_stats:
+                        stats[key] = image_stats
+
             results.append({"episode_index": idx, "stats": stats})
+            if progress_cb:
+                progress_cb(
+                    "compute_stats",
+                    "正在计算统计信息",
+                    f"已完成 episode {idx} 的统计 ({len(results)}/{total_episodes})",
+                    len(results),
+                    total_episodes,
+                )
         return results
 
-    def compute_stats(self):
+    def compute_stats(self, video_paths_by_episode=None, progress_cb=None):
         """基于 episode stats 聚合全局统计 (lerobot aggregate_stats 公式)"""
-        ep_stats_list = self.compute_episode_stats()
+        ep_stats_list = self.compute_episode_stats(video_paths_by_episode, progress_cb)
         all_keys = {}
         for es in ep_stats_list:
             for k in es["stats"]:
@@ -828,32 +1068,49 @@ class DatasetEditor:
 
         global_stats = {}
         for key, stats_list in all_keys.items():
-            mins   = np.array([s["min"]  for s in stats_list])
-            maxs   = np.array([s["max"]  for s in stats_list])
-            means  = np.array([s["mean"] for s in stats_list])
-            stds   = np.array([s["std"]  for s in stats_list])
-            counts = np.array([s["count"][0] for s in stats_list]).reshape(-1, 1)
-
+            mins = np.array([s["min"] for s in stats_list], dtype=np.float64)
+            maxs = np.array([s["max"] for s in stats_list], dtype=np.float64)
+            means = np.array([s["mean"] for s in stats_list], dtype=np.float64)
+            stds = np.array([s["std"] for s in stats_list], dtype=np.float64)
+            counts = np.array([s["count"][0] for s in stats_list], dtype=np.float64)
             total_count = counts.sum()
-            total_mean = (means * counts).sum(0) / total_count
-            total_var = ((stds ** 2 + (means - total_mean) ** 2) * counts).sum(0) / total_count
+            count_weights = counts.reshape((len(counts),) + (1,) * (means.ndim - 1))
+            total_mean = (means * count_weights).sum(0) / total_count
+            total_var = (
+                (stds ** 2 + (means - total_mean) ** 2) * count_weights
+            ).sum(0) / total_count
             total_std = np.sqrt(np.maximum(0, total_var))
 
-            global_stats[key] = {
+            merged = {
                 "min":  mins.min(0).tolist(),
                 "max":  maxs.max(0).tolist(),
                 "mean": total_mean.tolist(),
                 "std":  total_std.tolist(),
                 "count": [int(total_count)],
             }
+
+            for metric in stats_list[0]:
+                if not metric.startswith("q"):
+                    continue
+                if not all(metric in s for s in stats_list):
+                    continue
+                values = np.array([s[metric] for s in stats_list], dtype=np.float64)
+                merged[metric] = ((values * count_weights).sum(0) / total_count).tolist()
+
+            global_stats[key] = merged
         return global_stats, ep_stats_list
 
     # ─── 保存 ───
 
-    def save_as(self, output_path: str):
+    def save_as(self, output_path: str, progress_cb=None):
         """另存为新数据集 (含重算的统计元数据)"""
         out = Path(output_path).resolve()
 
+        def report(stage, title, detail="", current=0, total=0):
+            if progress_cb:
+                progress_cb(stage, title, detail, current, total)
+
+        report("prepare", "正在准备保存", "正在创建输出目录...", 0, 1)
         if out.exists():
             shutil.rmtree(out)
         out.mkdir(parents=True, exist_ok=True)
@@ -862,19 +1119,23 @@ class DatasetEditor:
         meta_dir.mkdir()
 
         # ── info.json ──
+        report("write_meta", "正在写入元数据", "正在写入 info / episodes / tasks ...", 0, 3)
         self._refresh_info()
         with open(meta_dir / "info.json", "w") as f:
             json.dump(self.info, f, indent=2, ensure_ascii=False)
 
         # ── episodes.jsonl ──
+        report("write_meta", "正在写入元数据", "正在写入 episodes.jsonl ...", 1, 3)
         with open(meta_dir / "episodes.jsonl", "w") as f:
             for em in self.episodes_meta:
                 f.write(json.dumps(em, ensure_ascii=False) + "\n")
 
         # ── tasks.jsonl ──
+        report("write_meta", "正在写入元数据", "正在写入 tasks.jsonl ...", 2, 3)
         with open(meta_dir / "tasks.jsonl", "w") as f:
             for t in self.tasks:
                 f.write(json.dumps(t, ensure_ascii=False) + "\n")
+        report("write_meta", "正在写入元数据", "元数据文件已完成", 3, 3)
 
         # ── 修正数据列 (timestamp, index) 以保证统计和 Parquet 一致 ──
         data_tpl = self.info.get(
@@ -883,7 +1144,10 @@ class DatasetEditor:
         video_tpl = self.info.get("video_path", "")
         chunks_size = self.info.get("chunks_size", 1000)
         features = self.info.get("features", {})
-        video_keys = [k for k in features if "images" in k]
+        video_keys = [
+            k for k, meta in features.items()
+            if meta.get("dtype") in ("image", "video")
+        ]
         fps = self.info.get("fps", 30)
 
         global_idx = 0
@@ -900,18 +1164,18 @@ class DatasetEditor:
                 df["index"] = range(global_idx, global_idx + len(df))
             global_idx += len(df)
 
-        # ── stats.json + episodes_stats.jsonl ──
-        global_stats, ep_stats = self.compute_stats()
-        with open(meta_dir / "stats.json", "w") as f:
-            json.dump(global_stats, f, indent=2, ensure_ascii=False)
-        with open(meta_dir / "episodes_stats.jsonl", "w") as f:
-            for s in ep_stats:
-                f.write(json.dumps(s, ensure_ascii=False) + "\n")
-
         # ── Parquet 数据 + 收集视频任务 ──
         encode_tasks = []   # (src_path, keep_indices, dst_path)
         copy_tasks = []     # (src_path, dst_path)
+        saved_video_paths = {}
+        valid_episodes = [
+            em["episode_index"] for em in self.episodes_meta
+            if em["episode_index"] in self.episode_data
+        ]
+        total_episodes = len(valid_episodes)
+        report("write_parquet", "正在导出 Parquet", "正在写出每个 episode 的 parquet 文件...", 0, total_episodes)
 
+        written_episodes = 0
         for em in self.episodes_meta:
             idx = em["episode_index"]
             if idx not in self.episode_data:
@@ -934,6 +1198,14 @@ class DatasetEditor:
             pq_path = out / rel
             pq_path.parent.mkdir(parents=True, exist_ok=True)
             save_df.to_parquet(pq_path, index=False)
+            written_episodes += 1
+            report(
+                "write_parquet",
+                "正在导出 Parquet",
+                f"已写出 episode {idx} ({written_episodes}/{total_episodes})",
+                written_episodes,
+                total_episodes,
+            )
 
             # ── 收集视频任务 ──
             for cam_name, src_path_str in orig_videos.items():
@@ -961,6 +1233,7 @@ class DatasetEditor:
 
                 dst = out / dst_rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                saved_video_paths.setdefault(idx, {})[vkey] = str(dst)
 
                 if frames_edited:
                     keep = [int(x) for x in df["_orig_frame_idx"].tolist()]
@@ -969,14 +1242,25 @@ class DatasetEditor:
                     copy_tasks.append((str(src), str(dst)))
 
         # ── 直接复制未修改的视频 ──
-        for src, dst in copy_tasks:
+        total_copy = len(copy_tasks)
+        if total_copy:
+            report("copy_videos", "正在复制未修改视频", f"共 {total_copy} 个视频待复制...", 0, total_copy)
+        for i, (src, dst) in enumerate(copy_tasks, 1):
             shutil.copy2(src, dst)
+            report("copy_videos", "正在复制未修改视频", f"已复制 {i}/{total_copy} 个视频", i, total_copy)
         log.info(f"已复制 {len(copy_tasks)} 个未修改视频")
 
         # ── 多线程并行重编码修改过的视频 ──
         if encode_tasks:
             src_params = self._probe_video_params(encode_tasks[0][0])
             workers = min(len(encode_tasks), max(1, (os.cpu_count() or 4) // 2))
+            report(
+                "encode_videos",
+                "正在重编码修改后视频",
+                f"共 {len(encode_tasks)} 个视频，使用 {workers} 路并行...",
+                0,
+                len(encode_tasks),
+            )
             log.info(
                 f"开始视频重编码: {len(encode_tasks)} 个视频, "
                 f"{workers} 路并行 (codec={src_params.get('codec','?')} "
@@ -1001,11 +1285,28 @@ class DatasetEditor:
                         shutil.copy2(src, dst)
                         failed += 1
                     log.info(f"视频编码进度: {i}/{len(encode_tasks)}")
+                    report(
+                        "encode_videos",
+                        "正在重编码修改后视频",
+                        f"已处理 {i}/{len(encode_tasks)} 个视频",
+                        i,
+                        len(encode_tasks),
+                    )
 
             if failed:
                 log.warning(f"{failed} 个视频重编码失败, 已回退复制原始文件")
 
+        # ── stats.json + episodes_stats.jsonl ──
+        report("compute_stats", "正在计算统计信息", "正在重算全局与 episode 级统计...", 0, len(valid_episodes))
+        global_stats, ep_stats = self.compute_stats(saved_video_paths, report)
+        with open(meta_dir / "stats.json", "w") as f:
+            json.dump(global_stats, f, indent=2, ensure_ascii=False)
+        with open(meta_dir / "episodes_stats.jsonl", "w") as f:
+            for s in ep_stats:
+                f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
         self.modified = False
+        report("done", "保存完成", f"数据集已保存到: {out}", 1, 1)
         log.info(f"数据集已保存到: {out}")
         return True
 
@@ -1132,6 +1433,11 @@ def api_analyze_deletion():
     return jsonify(result)
 
 
+@app.route("/api/save_progress")
+def api_save_progress():
+    return jsonify(get_save_progress())
+
+
 @app.route("/api/save", methods=["POST"])
 def api_save():
     if _editor is None:
@@ -1142,9 +1448,12 @@ def api_save():
         return jsonify({"error": "请指定保存路径"}), 400
 
     try:
-        _editor.save_as(output)
+        set_save_progress("prepare", "正在准备保存", "正在初始化保存任务...", 0, 1, True)
+        _editor.save_as(output, set_save_progress)
+        set_save_progress("done", "保存完成", f"数据集已保存到: {output}", 1, 1, False)
         return jsonify({"success": True, "path": output})
     except Exception as e:
+        set_save_progress("error", "保存失败", str(e), 0, 0, False)
         log.exception("保存失败")
         return jsonify({"error": str(e)}), 500
 
@@ -1159,4 +1468,4 @@ if __name__ == "__main__":
 
     print(f"\n  ═══ LeRobot v2.1 数据集编辑器 ═══")
     print(f"  浏览器访问: http://localhost:{args.port}\n")
-    app.run(host=args.host, port=args.port, debug=False)
+    app.run(host=args.host, port=args.port, debug=False, threaded=True)

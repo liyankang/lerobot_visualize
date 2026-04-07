@@ -9,6 +9,8 @@ const S = {
     videoPlaying: false, videoFrame: 0, videoTotalFrames: 0, videoTimer: null,
     chartClickState: 0,     // 0=空闲, 1=等待结束帧
     bridgePreview: [],      // 桥接帧预览 (分析模态框打开时高亮)
+    uiLocked: false,        // 保存期间锁住页面交互
+    saveProgressTimer: null,
 };
 
 const COLORS = [
@@ -30,6 +32,7 @@ const post = (u,b) => api(u,{method:'POST',headers:{'Content-Type':'application/
 // ═══════════════════════ 核心操作 ═══════════════════════
 
 async function loadDataset() {
+    if (S.uiLocked) return;
     const path = $('ds-path').value.trim();
     if (!path) return toast('请输入数据集路径','error');
     toast('正在加载...','info');
@@ -45,6 +48,7 @@ async function loadDataset() {
 }
 
 async function viewEpisode(idx) {
+    if (S.uiLocked) return;
     videoPause();
     toast('加载 Episode...','info');
     const d = await api(`/api/episode/${idx}`);
@@ -54,6 +58,7 @@ async function viewEpisode(idx) {
 }
 
 async function doDeleteEp() {
+    if (S.uiLocked) return;
     const idx = Array.from(S.selEpisodes);
     if (!idx.length) return toast('请先勾选要删除的 Episode','error');
     if (!confirm(`确定删除 ${idx.length} 个 Episode?\n\n${idx.join(', ')}`)) return;
@@ -66,6 +71,7 @@ async function doDeleteEp() {
 }
 
 async function doDeleteFrames() {
+    if (S.uiLocked) return;
     const fr = Array.from(S.selFrames).sort((a,b)=>a-b);
     if (!fr.length) return toast('请先选择要删除的片段','error');
     if (S.curEp===null) return;
@@ -89,6 +95,7 @@ async function doDeleteFrames() {
 }
 
 async function executeDelete(framesToDelete, keepFrames=[]) {
+    if (S.uiLocked) return;
     const actual = keepFrames.length > 0
         ? framesToDelete.filter(f => !keepFrames.includes(f))
         : framesToDelete;
@@ -187,12 +194,25 @@ async function forceDeleteAll(frames) {
 }
 
 async function doSave() {
+    if (S.uiLocked) return;
     const p = $('save-path').value.trim();
     if (!p) return toast('请输入保存路径','error');
     if (!confirm(`保存到:\n${p}\n\n已有路径将被覆盖!`)) return;
+    lockUI('正在保存数据集', '正在写入 Parquet、导出视频并重算统计信息，请稍候...');
+    startSaveProgressPolling();
     toast('正在保存 (含统计重算)...','info');
-    const d = await post('/api/save',{output_path:p});
-    toast(`保存成功: ${d.path}`,'success');
+    try {
+        const d = await post('/api/save',{output_path:p});
+        updateLoadingProgress({
+            title: '保存完成',
+            detail: `数据集已保存到: ${d.path}`,
+            percent: 100,
+        });
+        toast(`保存成功: ${d.path}`,'success');
+    } finally {
+        stopSaveProgressPolling();
+        unlockUI();
+    }
 }
 
 // ═══════════════════════ 视频同步 ═══════════════════════
@@ -483,17 +503,70 @@ function toggleJt(nm,ck) { ck?S.activeJoints.add(nm):S.activeJoints.delete(nm); 
 function toggleJtGrp(g,ck) { for(const j of(S.jointGroups[g]||[])){ck?S.activeJoints.add(j):S.activeJoints.delete(j);} renderJointSel(); if(S.curEpData)updateChart(S.curEpData.frames); }
 
 function addFrameRange() {
+    if (S.uiLocked) return;
     const f=parseInt($('fr-from').value), t=parseInt($('fr-to').value);
     if (isNaN(f)||isNaN(t)||f<0||t<f) return toast('请输入有效范围','error');
     for(let i=f;i<=t;i++) S.selFrames.add(i); S.chartClickState=0; renderSelRanges();
     toast(`已添加: 帧${f}-${t} (${t-f+1}帧)`,'success');
 }
-function rmRange(s,e) { for(let i=s;i<=e;i++) S.selFrames.delete(i); renderSelRanges(); }
-function clearFrameSel() { S.selFrames.clear(); S.chartClickState=0; $('fr-from').value=''; $('fr-to').value=''; renderSelRanges(); }
+function rmRange(s,e) { if (S.uiLocked) return; for(let i=s;i<=e;i++) S.selFrames.delete(i); renderSelRanges(); }
+function clearFrameSel() { if (S.uiLocked) return; S.selFrames.clear(); S.chartClickState=0; $('fr-from').value=''; $('fr-to').value=''; renderSelRanges(); }
 
 // ═══════════════════════ 工具 ═══════════════════════
 
 function $(id) { return document.getElementById(id); }
+function lockUI(title='处理中', detail='请稍候...') {
+    S.uiLocked = true;
+    document.body.classList.add('ui-locked');
+    const overlay = $('loading-overlay');
+    if (!overlay) return;
+    $('loading-title').textContent = title;
+    $('loading-detail').textContent = detail;
+    $('loading-meta').textContent = '';
+    overlay.classList.add('show');
+    overlay.setAttribute('aria-hidden', 'false');
+}
+function unlockUI() {
+    S.uiLocked = false;
+    document.body.classList.remove('ui-locked');
+    const overlay = $('loading-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('show');
+    overlay.setAttribute('aria-hidden', 'true');
+}
+function updateLoadingProgress(progress) {
+    if (!progress) return;
+    const title = progress.title || '正在处理中';
+    const detail = progress.detail || '请稍候...';
+    $('loading-title').textContent = title;
+    $('loading-detail').textContent = detail;
+    if (typeof progress.percent === 'number') {
+        $('loading-meta').textContent = `进度 ${progress.percent}%`;
+    } else if (progress.current > 0 || progress.total > 0) {
+        $('loading-meta').textContent = `进度 ${progress.current || 0}/${progress.total || 0}`;
+    } else {
+        $('loading-meta').textContent = '';
+    }
+}
+async function pollSaveProgressOnce() {
+    try {
+        const r = await fetch('/api/save_progress');
+        if (!r.ok) return;
+        const d = await r.json();
+        updateLoadingProgress(d);
+    } catch(_e) {}
+}
+function startSaveProgressPolling() {
+    stopSaveProgressPolling();
+    pollSaveProgressOnce();
+    S.saveProgressTimer = setInterval(pollSaveProgressOnce, 500);
+}
+function stopSaveProgressPolling() {
+    if (S.saveProgressTimer) {
+        clearInterval(S.saveProgressTimer);
+        S.saveProgressTimer = null;
+    }
+}
 function compressRanges(sorted) {
     if(!sorted.length)return[]; const r=[]; let rs=sorted[0],re=sorted[0];
     for(let i=1;i<sorted.length;i++){sorted[i]===re+1?re=sorted[i]:(r.push([rs,re]),rs=re=sorted[i]);}
@@ -514,6 +587,10 @@ document.addEventListener('DOMContentLoaded',()=>{
     $('ds-path').addEventListener('keydown',e=>{if(e.key==='Enter')loadDataset();});
     $('fr-to').addEventListener('keydown',e=>{if(e.key==='Enter')addFrameRange();});
     document.addEventListener('keydown',e=>{
+        if (S.uiLocked) {
+            e.preventDefault();
+            return;
+        }
         if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
         if(!S.curEpData)return;
         switch(e.code){
