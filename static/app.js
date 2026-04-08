@@ -1,5 +1,15 @@
 // ═══════════════════════ LeRobot 数据集编辑器 ═══════════════════════
 
+let THREE = null;
+let OrbitControls = null;
+let STLLoader = null;
+let ColladaLoader = null;
+let OBJLoader = null;
+let MTLLoader = null;
+let GLTFLoader = null;
+let URDFLoader = null;
+let urdfRuntimePromise = null;
+
 const S = {
     dataset: null, episodes: [], curEp: null, curEpData: null,
     selEpisodes: new Set(), selFrames: new Set(),
@@ -11,6 +21,31 @@ const S = {
     bridgePreview: [],      // 桥接帧预览 (分析模态框打开时高亮)
     uiLocked: false,        // 保存期间锁住页面交互
     saveProgressTimer: null,
+    urdf: {
+        packageId: null,
+        robotName: '',
+        rootUrl: '',
+        rootDir: '',
+        assetRoot: '',
+        jointNames: [],
+        jointMap: [],
+        jointInfo: {},
+        mappingMode: 'none',
+        mappingSummary: '',
+        source: 'state',
+        degreeMode: 'auto',
+        _detectedDegree: null,
+        scene: null,
+        camera: null,
+        renderer: null,
+        controls: null,
+        light: null,
+        grid: null,
+        robot: null,
+        resizeObserver: null,
+        animating: false,
+        loadError: '',
+    },
 };
 
 const COLORS = [
@@ -29,6 +64,349 @@ async function api(u, o={}) {
 }
 const post = (u,b) => api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
 
+async function ensureUrdfRuntime() {
+    if (THREE && OrbitControls && STLLoader && ColladaLoader && OBJLoader && MTLLoader && GLTFLoader && URDFLoader) {
+        return;
+    }
+    if (!urdfRuntimePromise) {
+        const esmBase = 'https://esm.sh';
+        const threeBase = `${esmBase}/three@0.160.1`;
+        urdfRuntimePromise = Promise.all([
+            import(threeBase),
+            import(`${threeBase}/examples/jsm/controls/OrbitControls.js`),
+            import(`${threeBase}/examples/jsm/loaders/STLLoader.js`),
+            import(`${threeBase}/examples/jsm/loaders/ColladaLoader.js`),
+            import(`${threeBase}/examples/jsm/loaders/OBJLoader.js`),
+            import(`${threeBase}/examples/jsm/loaders/MTLLoader.js`),
+            import(`${threeBase}/examples/jsm/loaders/GLTFLoader.js`),
+            import(`${esmBase}/urdf-loader@0.12.4?deps=three@0.160.1`),
+        ]).then(([
+            threeMod,
+            orbitMod,
+            stlMod,
+            colladaMod,
+            objMod,
+            mtlMod,
+            gltfMod,
+            urdfMod,
+        ]) => {
+            THREE = threeMod;
+            OrbitControls = orbitMod.OrbitControls;
+            STLLoader = stlMod.STLLoader;
+            ColladaLoader = colladaMod.ColladaLoader;
+            OBJLoader = objMod.OBJLoader;
+            MTLLoader = mtlMod.MTLLoader;
+            GLTFLoader = gltfMod.GLTFLoader;
+            URDFLoader = urdfMod.default;
+        }).catch((error) => {
+            urdfRuntimePromise = null;
+            throw error;
+        });
+    }
+    return urdfRuntimePromise;
+}
+
+function normalizeJointName(name='') {
+    return String(name).trim().toLowerCase().replace(/[\s\-]+/g, '_');
+}
+
+function tokenizeJointName(name='') {
+    const text = normalizeJointName(name)
+        .replace(/([a-z])([0-9])/g, '$1_$2')
+        .replace(/([0-9])([a-z])/g, '$1_$2');
+    return text
+        .split(/[^a-z0-9]+/)
+        .filter(Boolean)
+        .filter(token => !new Set([
+            'joint', 'joints', 'link', 'base', 'world', 'fixed', 'motor', 'actuator',
+            'axis', 'frame', 'root', 'arm', 'hand'
+        ]).has(token));
+}
+
+function jointNameVariants(name='') {
+    const normalized = normalizeJointName(name);
+    const tokens = tokenizeJointName(name);
+    const compact = normalized.replace(/_/g, '');
+    const variants = new Set([normalized, compact, tokens.join('_'), tokens.join('')]);
+    if (tokens.length > 1) {
+        variants.add(tokens.slice(-2).join('_'));
+        variants.add(tokens.slice(-2).join(''));
+        variants.add(tokens.at(-1));
+    }
+    return Array.from(variants).filter(Boolean);
+}
+
+function scoreJointNameMatch(datasetName, urdfName) {
+    const datasetNorm = normalizeJointName(datasetName);
+    const urdfNorm = normalizeJointName(urdfName);
+    if (!datasetNorm || !urdfNorm) return 0;
+    if (datasetNorm === urdfNorm) return 1000;
+
+    const datasetVariants = jointNameVariants(datasetName);
+    const urdfVariants = jointNameVariants(urdfName);
+    const urdfSet = new Set(urdfVariants);
+    let longestMatchLen = 0;
+    for (const v of datasetVariants) {
+        if (urdfSet.has(v) && v.length > longestMatchLen) longestMatchLen = v.length;
+    }
+    if (longestMatchLen > 0) {
+        const maxLen = Math.max(...datasetVariants.map(v => v.length), 1);
+        return Math.round(500 + 400 * (longestMatchLen / maxLen));
+    }
+
+    const dsTokens = tokenizeJointName(datasetName);
+    const urTokens = tokenizeJointName(urdfName);
+    if (!dsTokens.length || !urTokens.length) return 0;
+
+    const dsSet = new Set(dsTokens);
+    const urSet = new Set(urTokens);
+    const overlap = dsTokens.filter(token => urSet.has(token));
+    if (!overlap.length) {
+        if (urdfNorm.endsWith(datasetNorm) || datasetNorm.endsWith(urdfNorm)) return 300;
+        return 0;
+    }
+
+    let score = overlap.length * 120;
+    if (dsTokens.at(-1) === urTokens.at(-1)) score += 220;
+    if (dsTokens[0] === urTokens[0]) score += 80;
+    if (urdfNorm.includes(datasetNorm) || datasetNorm.includes(urdfNorm)) score += 60;
+    return score;
+}
+
+function buildUrdfJointMap(datasetJointNames, urdfJointNames) {
+    const available = new Set(urdfJointNames);
+    const map = [];
+
+    for (const [datasetIndex, datasetName] of datasetJointNames.entries()) {
+        let bestName = null;
+        let bestScore = 0;
+        for (const urdfName of available) {
+            const score = scoreJointNameMatch(datasetName, urdfName);
+            if (score > bestScore) {
+                bestScore = score;
+                bestName = urdfName;
+            }
+        }
+        if (bestName && bestScore >= 300) {
+            available.delete(bestName);
+            map.push({
+                datasetIndex,
+                datasetName,
+                urdfName: bestName,
+                score: bestScore,
+                mode: bestScore >= 900 ? 'name' : 'heuristic',
+            });
+        }
+    }
+
+    if (!map.length) {
+        const count = Math.min(datasetJointNames.length, urdfJointNames.length);
+        for (let i = 0; i < count; i += 1) {
+            map.push({
+                datasetIndex: i,
+                datasetName: datasetJointNames[i],
+                urdfName: urdfJointNames[i],
+                score: 100,
+                mode: 'index',
+            });
+        }
+    } else if (map.length < Math.min(datasetJointNames.length, urdfJointNames.length)) {
+        const remainingDataset = datasetJointNames
+            .map((name, index) => ({ name, index }))
+            .filter(item => !map.some(existing => existing.datasetIndex === item.index));
+        const remainingUrdf = urdfJointNames.filter(name => !map.some(existing => existing.urdfName === name));
+        if (remainingDataset.length && remainingUrdf.length) {
+            const count = Math.min(remainingDataset.length, remainingUrdf.length);
+            for (let i = 0; i < count; i += 1) {
+                map.push({
+                    datasetIndex: remainingDataset[i].index,
+                    datasetName: remainingDataset[i].name,
+                    urdfName: remainingUrdf[i],
+                    score: 50,
+                    mode: 'index-fallback',
+                });
+            }
+        }
+    }
+
+    return map.sort((a, b) => a.datasetIndex - b.datasetIndex);
+}
+
+function summarizeJointMap(map, datasetJointNames, urdfJointNames) {
+    if (!map.length) return { mode: 'none', text: '未建立关节映射' };
+    const manual = map.filter(item => item.mode === 'manual').length;
+    const pureName = map.filter(item => item.mode === 'name').length;
+    const heuristic = map.filter(item => item.mode === 'heuristic').length;
+    const index = map.filter(item => item.mode === 'index' || item.mode === 'index-fallback').length;
+    const parts = [`已映射 ${map.length}/${datasetJointNames.length}`];
+    if (manual) parts.push(`手动 ${manual}`);
+    if (pureName) parts.push(`精确 ${pureName}`);
+    if (heuristic) parts.push(`近似 ${heuristic}`);
+    if (index) parts.push(`按序 ${index}`);
+    let mode;
+    if (manual) mode = 'manual';
+    else if (index && !pureName && !heuristic) mode = 'index';
+    else if (heuristic || index) mode = 'mixed';
+    else mode = 'name';
+    return {
+        mode,
+        text: `${parts.join(' · ')}，URDF 可动关节 ${urdfJointNames.length}`,
+    };
+}
+
+async function uploadUrdfBundle(files, rootFile='') {
+    const list = Array.from(files || []);
+    if (!list.length) return;
+
+    try {
+        updateUrdfUploadStatus('正在加载 3D 组件...');
+        await ensureUrdfRuntime();
+
+        const form = new FormData();
+        const manifest = list.map(file => ({
+            path: file.webkitRelativePath || file.name,
+            name: file.name,
+        }));
+        for (const file of list) form.append('files', file, file.name);
+        form.append('manifest', JSON.stringify(manifest));
+        form.append('root_file', rootFile || manifest.find(item => item.path.toLowerCase().endsWith('.urdf'))?.path || manifest[0].path);
+
+        updateUrdfUploadStatus('正在上传 URDF 资源...');
+        const resp = await fetch('/api/urdf/upload', { method: 'POST', body: form });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        await loadUrdfRobot(data);
+        toast(`URDF 已加载: ${data.robot_name}`,'success');
+    } catch (e) {
+        updateUrdfUploadStatus(`URDF 加载失败: ${e.message}`);
+        toast(e.message,'error');
+        throw e;
+    }
+}
+
+function guessRootUrdf(files) {
+    const list = Array.from(files || []);
+    const urdfs = list
+        .map(file => file.webkitRelativePath || file.name)
+        .filter(path => path.toLowerCase().endsWith('.urdf'))
+        .sort();
+    return urdfs[0] || '';
+}
+
+function resolveUrdfAssetUrl(url, baseUrl='') {
+    if (!url) return '';
+    if (url.startsWith('data:')) return url;
+    if (/^(https?:)?\/\//.test(url) || url.startsWith('/api/urdf_asset/')) return url;
+    if (url.startsWith('package://')) {
+        return `${S.urdf.assetRoot}/${url.replace(/^package:\/\//, '')}`;
+    }
+
+    const fallbackBase = S.urdf.rootUrl || '/';
+    try {
+        return new URL(url, new URL(baseUrl || fallbackBase, window.location.origin)).toString();
+    } catch (_e) {
+        return url;
+    }
+}
+
+function createDefaultMeshMaterial() {
+    return new THREE.MeshStandardMaterial({
+        color: 0xb8c7d9,
+        metalness: 0.1,
+        roughness: 0.78,
+    });
+}
+
+function applyUrdfObjectStyle(root) {
+    root.traverse(obj => {
+        if (!obj.isMesh) return;
+        if (!obj.material) obj.material = createDefaultMeshMaterial();
+        if (Array.isArray(obj.material)) {
+            obj.material = obj.material.map(mat => mat || createDefaultMeshMaterial());
+        }
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+    });
+    return root;
+}
+
+function loadObjWithOptionalMtl(url, manager, done) {
+    const objLoader = new OBJLoader(manager);
+    const resourceDir = url.replace(/[^/]*([?#].*)?$/, '');
+    objLoader.setResourcePath(resourceDir);
+    const finishObjLoad = () => {
+        objLoader.load(
+            url,
+            object => done(applyUrdfObjectStyle(object)),
+            undefined,
+            () => done(new THREE.Group()),
+        );
+    };
+
+    const mtlUrl = url.replace(/\.[^/.?#]+([?#].*)?$/i, '.mtl$1');
+    const mtlLoader = new MTLLoader(manager);
+    mtlLoader.setResourcePath(resourceDir);
+    mtlLoader.load(
+        mtlUrl,
+        materials => {
+            materials.preload();
+            objLoader.setMaterials(materials);
+            finishObjLoad();
+        },
+        undefined,
+        () => finishObjLoad(),
+    );
+}
+
+function createUrdfMeshLoader(manager) {
+    return (path, loadManager, done) => {
+        const effectiveManager = loadManager || manager;
+        const resolved = resolveUrdfAssetUrl(path);
+        const lower = resolved.toLowerCase();
+
+        if (lower.endsWith('.stl')) {
+            new STLLoader(effectiveManager).load(
+                resolved,
+                geometry => {
+                    geometry.computeVertexNormals?.();
+                    done(applyUrdfObjectStyle(new THREE.Mesh(geometry, createDefaultMeshMaterial())));
+                },
+                undefined,
+                () => done(new THREE.Group()),
+            );
+            return;
+        }
+
+        if (lower.endsWith('.dae')) {
+            new ColladaLoader(effectiveManager).load(
+                resolved,
+                collada => done(applyUrdfObjectStyle(collada.scene || new THREE.Group())),
+                undefined,
+                () => done(new THREE.Group()),
+            );
+            return;
+        }
+
+        if (lower.endsWith('.obj')) {
+            loadObjWithOptionalMtl(resolved, effectiveManager, done);
+            return;
+        }
+
+        if (lower.endsWith('.glb') || lower.endsWith('.gltf')) {
+            new GLTFLoader(effectiveManager).load(
+                resolved,
+                gltf => done(applyUrdfObjectStyle(gltf.scene || new THREE.Group())),
+                undefined,
+                () => done(new THREE.Group()),
+            );
+            return;
+        }
+
+        console.warn(`Unsupported URDF mesh asset: ${path}`);
+        done(new THREE.Group());
+    };
+}
+
 // ═══════════════════════ 核心操作 ═══════════════════════
 
 async function loadDataset() {
@@ -42,6 +420,15 @@ async function loadDataset() {
     S.selEpisodes.clear(); S.selFrames.clear();
     S.curEp=null; S.curEpData=null;
     S.activeJoints = new Set(d.joint_names.slice(0,7));
+    if (S.urdf.packageId) {
+        S.urdf.jointMap = buildUrdfJointMap(S.jointNames, S.urdf.jointNames);
+        S.urdf._detectedDegree = null;
+        const mapping = summarizeJointMap(S.urdf.jointMap, S.jointNames, S.urdf.jointNames);
+        S.urdf.mappingMode = mapping.mode;
+        S.urdf.mappingSummary = mapping.text;
+        updateUrdfUploadStatus(`已加载 ${S.urdf.robotName || 'URDF'}，${mapping.text}`);
+        if (S.urdf.jointMap.length) showJointMappingModal();
+    }
     renderSummary(); renderEpList(); renderJointSel(); hideDetail();
     $('save-path').value = path+'_edited';
     toast(`已加载: ${d.summary.total_episodes} ep, ${d.summary.total_frames} 帧`,'success');
@@ -53,6 +440,7 @@ async function viewEpisode(idx) {
     toast('加载 Episode...','info');
     const d = await api(`/api/episode/${idx}`);
     S.curEp=idx; S.curEpData=d; S.selFrames.clear(); S.chartClickState=0;
+    S.urdf._detectedDegree = null;
     renderEpDetail(d); renderEpList();
     toast(`Ep ${idx}: ${d.frames.length} 帧`,'success');
 }
@@ -215,6 +603,465 @@ async function doSave() {
     }
 }
 
+// ═══════════════════════ URDF 预览 ═══════════════════════
+
+function updateUrdfUploadStatus(text) {
+    const el = $('urdf-upload-status');
+    if (el) el.textContent = text;
+}
+
+function renderUrdfPanel() {
+    const panel = $('urdf-panel');
+    const info = $('urdf-info');
+    const empty = $('urdf-viewer-empty');
+    const viewer = $('urdf-viewer');
+    if (!panel || !info || !empty || !viewer) return;
+
+    const hasPackage = !!S.urdf.packageId;
+    panel.classList.toggle('show', hasPackage);
+    if (!hasPackage) return;
+
+    const matched = S.urdf.jointMap.length;
+    const total = S.jointNames.length || 0;
+    const robotName = S.urdf.robotName || '未命名机器人';
+    const src = S.urdf.source === 'action' ? 'Action' : 'State';
+    const mappingText = S.urdf.mappingSummary || `已映射 ${matched}/${total}`;
+    let degLabel = '';
+    if (S.urdf.degreeMode === 'degree') degLabel = ' · 角度制→弧度';
+    else if (S.urdf.degreeMode === 'radian') degLabel = ' · 弧度制';
+    else if (S.urdf._detectedDegree === true) degLabel = ' · 自动:角度制→弧度';
+    else if (S.urdf._detectedDegree === false) degLabel = ' · 自动:弧度制';
+    info.textContent = S.urdf.loadError
+        ? `${robotName} · 加载失败: ${S.urdf.loadError}`
+        : `${robotName} · ${mappingText} · ${src}${degLabel}`;
+
+    empty.style.display = S.urdf.robot ? 'none' : 'flex';
+    if (!S.urdf.robot && S.urdf.loadError) {
+        empty.textContent = `模型加载失败：${S.urdf.loadError}。如果 URDF 依赖 meshes/贴图，请优先使用“上传目录”并保持原始目录结构。`;
+    } else {
+        empty.textContent = '上传 URDF 后，这里会显示 3D 机器人预览，并跟随当前播放进度实时联动。';
+    }
+    viewer.style.display = S.urdf.robot ? 'block' : 'none';
+    $('urdf-source').value = S.urdf.source;
+    const degSel = $('urdf-deg-mode');
+    if (degSel) degSel.value = S.urdf.degreeMode;
+}
+
+function ensureUrdfViewer() {
+    if (S.urdf.scene) return;
+
+    const container = $('urdf-viewer');
+    if (!container) return;
+
+    const scene = new THREE.Scene();
+    scene.background = null;
+
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+    camera.position.set(2.8, 2.1, 2.8);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(container.clientWidth || 640, container.clientHeight || 300);
+    container.innerHTML = '';
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 0.7, 0);
+
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x8aa0b6, 1.25);
+    scene.add(hemi);
+
+    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+    dir.position.set(4, 8, 5);
+    scene.add(dir);
+
+    const fill = new THREE.DirectionalLight(0xffffff, 0.45);
+    fill.position.set(-3, 4, -5);
+    scene.add(fill);
+
+    const grid = new THREE.GridHelper(8, 20, 0x9db2c7, 0xd8e2ec);
+    grid.position.y = 0;
+    scene.add(grid);
+
+    S.urdf.scene = scene;
+    S.urdf.camera = camera;
+    S.urdf.renderer = renderer;
+    S.urdf.controls = controls;
+    S.urdf.light = dir;
+    S.urdf.grid = grid;
+
+    if (!S.urdf.resizeObserver && window.ResizeObserver) {
+        S.urdf.resizeObserver = new ResizeObserver(() => resizeUrdfViewer());
+        S.urdf.resizeObserver.observe(container);
+    }
+
+    if (!S.urdf.animating) {
+        S.urdf.animating = true;
+        const loop = () => {
+            if (!S.urdf.animating || !S.urdf.renderer || !S.urdf.scene || !S.urdf.camera) return;
+            S.urdf.controls?.update();
+            S.urdf.renderer.render(S.urdf.scene, S.urdf.camera);
+            requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+    }
+}
+
+function resizeUrdfViewer() {
+    const container = $('urdf-viewer');
+    if (!container || !S.urdf.renderer || !S.urdf.camera) return;
+    const width = Math.max(container.clientWidth || 0, 1);
+    const height = Math.max(container.clientHeight || 0, 1);
+    S.urdf.camera.aspect = width / height;
+    S.urdf.camera.updateProjectionMatrix();
+    S.urdf.renderer.setSize(width, height);
+}
+
+function fitUrdfCamera() {
+    const robot = S.urdf.robot;
+    if (!robot || !S.urdf.camera || !S.urdf.controls) return;
+
+    const box = new THREE.Box3().setFromObject(robot);
+    if (box.isEmpty()) {
+        S.urdf.camera.position.set(2.8, 2.1, 2.8);
+        S.urdf.controls.target.set(0, 0.7, 0);
+        S.urdf.controls.update();
+        return;
+    }
+
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const radius = Math.max(size.x, size.y, size.z, 0.5);
+    S.urdf.controls.target.copy(center);
+    S.urdf.camera.position.set(
+        center.x + radius * 1.8,
+        center.y + radius * 1.4,
+        center.z + radius * 1.8,
+    );
+    S.urdf.camera.near = Math.max(radius / 100, 0.01);
+    S.urdf.camera.far = Math.max(radius * 20, 20);
+    S.urdf.camera.updateProjectionMatrix();
+    S.urdf.controls.update();
+}
+
+function clearUrdfRobot() {
+    if (S.urdf.robot && S.urdf.scene) S.urdf.scene.remove(S.urdf.robot);
+    S.urdf.robot = null;
+    S.urdf.loadError = '';
+    S.urdf.mappingMode = 'none';
+    S.urdf.mappingSummary = '';
+    renderUrdfPanel();
+}
+
+async function loadUrdfRobot(meta) {
+    ensureUrdfViewer();
+    clearUrdfRobot();
+
+    S.urdf.packageId = meta.package_id;
+    S.urdf.robotName = meta.robot_name || '';
+    S.urdf.rootUrl = meta.root_url;
+    S.urdf.rootDir = meta.root_url.replace(/[^/]*$/, '');
+    S.urdf.assetRoot = meta.asset_root;
+    S.urdf.jointInfo = meta.joint_info || {};
+    S.urdf.jointNames = meta.movable_joint_names || meta.joint_names || [];
+    S.urdf.jointMap = buildUrdfJointMap(S.jointNames, S.urdf.jointNames);
+    S.urdf._detectedDegree = null;
+    const mapping = summarizeJointMap(S.urdf.jointMap, S.jointNames, S.urdf.jointNames);
+    S.urdf.mappingMode = mapping.mode;
+    S.urdf.mappingSummary = mapping.text;
+    S.urdf.loadError = '';
+    updateUrdfUploadStatus(`已加载 ${S.urdf.robotName || 'URDF'}，${mapping.text}`);
+    renderUrdfPanel();
+
+    const manager = new THREE.LoadingManager();
+    manager.setURLModifier((url) => resolveUrdfAssetUrl(url));
+
+    const loader = new URDFLoader(manager);
+    loader.packages = `${S.urdf.assetRoot}/`;
+    loader.fetchOptions = { credentials: 'same-origin' };
+    loader.loadMeshCb = createUrdfMeshLoader(manager);
+
+    const robot = await new Promise((resolve, reject) => {
+        loader.load(S.urdf.rootUrl, resolve, undefined, reject);
+    }).catch((error) => {
+        S.urdf.loadError = error?.message || '未知错误';
+        renderUrdfPanel();
+        throw error;
+    });
+
+    robot.rotation.x = -Math.PI / 2;
+
+    const allRuntimeNames = Object.keys(robot.joints || {});
+    const runtimeJointNames = allRuntimeNames.filter(name => {
+        const j = robot.joints[name];
+        return j && j.jointType && j.jointType !== 'fixed';
+    });
+
+    if (allRuntimeNames.length !== runtimeJointNames.length) {
+        console.info(
+            `[URDF] 已过滤 ${allRuntimeNames.length - runtimeJointNames.length} 个 fixed 关节，` +
+            `保留 ${runtimeJointNames.length} 个可动关节`
+        );
+    }
+
+    if (runtimeJointNames.length) {
+        S.urdf.jointNames = runtimeJointNames;
+        S.urdf.jointMap = buildUrdfJointMap(S.jointNames, runtimeJointNames);
+        S.urdf._detectedDegree = null;
+        const runtimeMapping = summarizeJointMap(S.urdf.jointMap, S.jointNames, runtimeJointNames);
+        S.urdf.mappingMode = runtimeMapping.mode;
+        S.urdf.mappingSummary = runtimeMapping.text;
+        updateUrdfUploadStatus(`已加载 ${S.urdf.robotName || 'URDF'}，${runtimeMapping.text}`);
+    }
+
+    if (S.urdf.jointMap.length) {
+        console.group('[URDF] 关节映射诊断');
+        console.table(S.urdf.jointMap.map(m => ({
+            '数据集索引': m.datasetIndex,
+            '数据集关节': m.datasetName,
+            'URDF关节': m.urdfName,
+            '匹配方式': m.mode,
+            '置信分数': m.score,
+        })));
+        const unmappedDataset = S.jointNames.filter(
+            (_, i) => !S.urdf.jointMap.some(m => m.datasetIndex === i));
+        const unmappedUrdf = runtimeJointNames.filter(
+            name => !S.urdf.jointMap.some(m => m.urdfName === name));
+        if (unmappedDataset.length) console.warn('[URDF] 未映射的数据集关节:', unmappedDataset);
+        if (unmappedUrdf.length) console.warn('[URDF] 未映射的URDF关节:', unmappedUrdf);
+        console.groupEnd();
+    }
+
+    S.urdf.robot = robot;
+    S.urdf.scene.add(robot);
+    fitUrdfCamera();
+    resizeUrdfViewer();
+    syncUrdfPose();
+    renderUrdfPanel();
+
+    if (S.jointNames.length && S.urdf.jointMap.length) {
+        showJointMappingModal();
+    }
+}
+
+function detectDegreeMode(source) {
+    if (S.urdf.degreeMode === 'degree') return true;
+    if (S.urdf.degreeMode === 'radian') return false;
+    if (S.urdf._detectedDegree !== null) return S.urdf._detectedDegree;
+
+    let maxAbsRevoluteVal = 0;
+    for (const mapping of S.urdf.jointMap) {
+        const val = source[mapping.datasetIndex];
+        if (typeof val !== 'number' || Number.isNaN(val)) continue;
+        const jType = (S.urdf.jointInfo[mapping.urdfName]?.type) || 'revolute';
+        if (jType === 'revolute' || jType === 'continuous') {
+            maxAbsRevoluteVal = Math.max(maxAbsRevoluteVal, Math.abs(val));
+        }
+    }
+
+    S.urdf._detectedDegree = maxAbsRevoluteVal > 2 * Math.PI;
+    if (S.urdf._detectedDegree) {
+        console.info(
+            `[URDF] 自动检测: 数据可能为角度制 (旋转关节最大绝对值=${maxAbsRevoluteVal.toFixed(2)}, ` +
+            `超过 2π≈${(2 * Math.PI).toFixed(2)}), 将自动 deg→rad 转换`
+        );
+    } else {
+        console.info(
+            `[URDF] 自动检测: 数据为弧度制 (旋转关节最大绝对值=${maxAbsRevoluteVal.toFixed(2)})`
+        );
+    }
+    return S.urdf._detectedDegree;
+}
+
+function syncUrdfPose() {
+    if (!S.urdf.robot || !S.curEpData || !S.curEpData.frames?.length) return;
+    const frame = S.curEpData.frames[Math.max(0, Math.min(S.videoFrame, S.curEpData.frames.length - 1))];
+    if (!frame) return;
+
+    const source = S.urdf.source === 'action' ? frame.action : frame.state;
+    if (!Array.isArray(source)) return;
+
+    const useDeg = detectDegreeMode(source);
+    const DEG2RAD = Math.PI / 180;
+
+    for (const mapping of S.urdf.jointMap) {
+        const value = source[mapping.datasetIndex];
+        if (typeof value !== 'number' || Number.isNaN(value)) continue;
+
+        let finalValue = value;
+        if (useDeg) {
+            const jType = (S.urdf.jointInfo[mapping.urdfName]?.type) || 'revolute';
+            if (jType === 'revolute' || jType === 'continuous') {
+                finalValue = value * DEG2RAD;
+            }
+        }
+
+        try {
+            S.urdf.robot.setJointValue(mapping.urdfName, finalValue);
+        } catch (_e) {}
+    }
+}
+
+function resetUrdfCamera() {
+    fitUrdfCamera();
+}
+
+function showJointMappingModal() {
+    if (!S.jointNames.length || !S.urdf.jointNames.length) return;
+
+    const existing = document.getElementById('jm-modal');
+    if (existing) existing.remove();
+
+    const autoMap = {};
+    for (const m of S.urdf.jointMap) autoMap[m.datasetIndex] = m;
+
+    const sortedUrdf = S.urdf.jointNames.slice().sort();
+    const urdfOpts = sortedUrdf.map(n => `<option value="${n}">${n}</option>`).join('');
+
+    function badgeFor(entry) {
+        if (!entry) return { cls: 'jm-none', text: '未映射' };
+        if (entry.mode === 'manual') return { cls: 'jm-manual', text: '手动' };
+        if (entry.score >= 900) return { cls: 'jm-exact', text: '精确' };
+        if (entry.score >= 600) return { cls: 'jm-heuristic', text: '近似' };
+        if (entry.score >= 300) return { cls: 'jm-low', text: '低置信' };
+        return { cls: 'jm-none', text: '未映射' };
+    }
+
+    function rowHTML(jName) {
+        const idx = S.jointNames.indexOf(jName);
+        if (idx < 0) return '';
+        const entry = autoMap[idx];
+        const b = badgeFor(entry);
+        return `<tr>
+            <td class="jm-ds">${jName}</td>
+            <td style="color:#999;text-align:center;width:28px;">→</td>
+            <td><select class="jm-select" data-ds-idx="${idx}" data-ds-name="${jName}">
+                <option value="">(未映射)</option>${urdfOpts}
+            </select></td>
+            <td style="width:60px;"><span class="jm-badge ${b.cls}">${b.text}</span></td>
+        </tr>`;
+    }
+
+    let tableHTML = '';
+    const groupedSet = new Set();
+    for (const [grp, joints] of Object.entries(S.jointGroups)) {
+        tableHTML += `<tr class="jm-group"><td colspan="4">${grp}</td></tr>`;
+        for (const jn of joints) { tableHTML += rowHTML(jn); groupedSet.add(jn); }
+    }
+    const ungrouped = S.jointNames.filter(j => !groupedSet.has(j));
+    if (ungrouped.length) {
+        tableHTML += `<tr class="jm-group"><td colspan="4">其他</td></tr>`;
+        for (const jn of ungrouped) tableHTML += rowHTML(jn);
+    }
+
+    const html = `<div class="modal-overlay" id="jm-modal" onclick="if(event.target===this)closeJointMappingModal()">
+        <div class="modal-card jm-card">
+            <div class="modal-hdr"><h3>关节映射配置</h3><button class="modal-close" onclick="closeJointMappingModal()">×</button></div>
+            <div class="jm-summary">
+                数据集 ${S.jointNames.length} 个关节 · URDF ${S.urdf.jointNames.length} 个可动关节 · 自动匹配 ${S.urdf.jointMap.length} 个<br>
+                <small style="color:#888;">请核对每行映射是否正确，有误可直接在下拉菜单中修改</small>
+            </div>
+            <div class="modal-body" style="max-height:55vh;overflow-y:auto;">
+                <table class="jm-table">
+                    <thead><tr><th>数据集关节</th><th></th><th>URDF 关节</th><th>置信度</th></tr></thead>
+                    <tbody>${tableHTML}</tbody>
+                </table>
+            </div>
+            <div class="modal-footer">
+                <button class="bg" onclick="resetAutoMapping()">重新自动匹配</button>
+                <button class="bp" onclick="confirmJointMapping()">确认映射</button>
+            </div>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', html);
+
+    for (const [idx, m] of Object.entries(autoMap)) {
+        const sel = document.querySelector(`#jm-modal select[data-ds-idx="${idx}"]`);
+        if (sel && m.urdfName) sel.value = m.urdfName;
+    }
+
+    document.querySelectorAll('#jm-modal .jm-select').forEach(sel => {
+        sel.addEventListener('change', () => {
+            const badge = sel.closest('tr').querySelector('.jm-badge');
+            if (!badge) return;
+            if (sel.value) {
+                badge.className = 'jm-badge jm-manual';
+                badge.textContent = '手动';
+            } else {
+                badge.className = 'jm-badge jm-none';
+                badge.textContent = '未映射';
+            }
+        });
+    });
+}
+
+function closeJointMappingModal() {
+    const m = document.getElementById('jm-modal');
+    if (m) m.remove();
+}
+
+function confirmJointMapping() {
+    const selects = document.querySelectorAll('#jm-modal .jm-select');
+    const newMap = [];
+    const usedUrdf = new Map();
+    const duplicates = [];
+
+    for (const sel of selects) {
+        const dsIdx = parseInt(sel.dataset.dsIdx);
+        const dsName = sel.dataset.dsName;
+        const urdfName = sel.value;
+        if (!urdfName) continue;
+
+        if (usedUrdf.has(urdfName)) {
+            duplicates.push(`"${urdfName}" → ${usedUrdf.get(urdfName)} 和 ${dsName}`);
+        }
+        usedUrdf.set(urdfName, dsName);
+
+        newMap.push({
+            datasetIndex: dsIdx,
+            datasetName: dsName,
+            urdfName,
+            score: 1000,
+            mode: 'manual',
+        });
+    }
+
+    if (duplicates.length) {
+        if (!confirm(`以下 URDF 关节被重复映射:\n\n${duplicates.join('\n')}\n\n是否仍然继续?`)) return;
+    }
+
+    S.urdf.jointMap = newMap.sort((a, b) => a.datasetIndex - b.datasetIndex);
+    S.urdf._detectedDegree = null;
+
+    const mapping = summarizeJointMap(S.urdf.jointMap, S.jointNames, S.urdf.jointNames);
+    S.urdf.mappingMode = mapping.mode;
+    S.urdf.mappingSummary = mapping.text;
+    updateUrdfUploadStatus(`已加载 ${S.urdf.robotName || 'URDF'}，${mapping.text}`);
+
+    console.group('[URDF] 用户确认的关节映射');
+    console.table(newMap.map(m => ({
+        '数据集索引': m.datasetIndex,
+        '数据集关节': m.datasetName,
+        'URDF关节': m.urdfName,
+    })));
+    console.groupEnd();
+
+    closeJointMappingModal();
+    syncUrdfPose();
+    renderUrdfPanel();
+    toast(`关节映射已确认: ${newMap.length} 个映射`, 'success');
+}
+
+function resetAutoMapping() {
+    S.urdf.jointMap = buildUrdfJointMap(S.jointNames, S.urdf.jointNames);
+    S.urdf._detectedDegree = null;
+    closeJointMappingModal();
+    showJointMappingModal();
+    toast('已重新执行自动匹配', 'info');
+}
+
 // ═══════════════════════ 视频同步 ═══════════════════════
 
 const getVids = () => Array.from(document.querySelectorAll('#vw video'));
@@ -257,6 +1104,9 @@ function videoSync() {
     const lb=$('vfl'); if(lb) lb.textContent=`${S.videoFrame} / ${Math.max(0,S.videoTotalFrames-1)}`;
     refreshChart();
     renderFrameValues(S.videoFrame);
+    const prevDetected = S.urdf._detectedDegree;
+    syncUrdfPose();
+    if (prevDetected === null && S.urdf._detectedDegree !== null) renderUrdfPanel();
 }
 
 function onSliderInput(v) { videoPause(); S.videoFrame=parseInt(v)||0; videoSync(); }
@@ -316,12 +1166,15 @@ function renderEpDetail(data) {
     updateChart(data.frames);
     renderFrameInfo(data.frames);
     renderFrameValues(0);
+    renderUrdfPanel();
+    syncUrdfPose();
 }
 
 function hideDetail() {
     $('no-sel').style.display='flex';
     $('ep-det').classList.remove('show');
     videoPause();
+    renderUrdfPanel();
 }
 
 function renderVideos(videos) {
@@ -577,12 +1430,44 @@ function toast(m,t='info') { const b=$('tb'),e=document.createElement('div'); e.
 // ═══════════════════════ 初始化 ═══════════════════════
 
 document.addEventListener('DOMContentLoaded',()=>{
+    renderUrdfPanel();
     $('btn-load').addEventListener('click',loadDataset);
     $('btn-save').addEventListener('click',doSave);
     $('btn-del-ep').addEventListener('click',doDeleteEp);
     $('btn-del-fr').addEventListener('click',doDeleteFrames);
     $('btn-add-rng').addEventListener('click',addFrameRange);
     $('btn-clr-fr').addEventListener('click',clearFrameSel);
+    $('btn-urdf-file').addEventListener('click',()=>$('urdf-file-input').click());
+    $('btn-urdf-dir').addEventListener('click',()=>$('urdf-dir-input').click());
+    $('urdf-source').addEventListener('change',e=>{
+        S.urdf.source = e.target.value === 'action' ? 'action' : 'state';
+        S.urdf._detectedDegree = null;
+        renderUrdfPanel();
+        syncUrdfPose();
+    });
+    $('urdf-deg-mode').addEventListener('change',e=>{
+        S.urdf.degreeMode = e.target.value;
+        S.urdf._detectedDegree = null;
+        syncUrdfPose();
+    });
+    $('btn-urdf-mapping').addEventListener('click',showJointMappingModal);
+    $('btn-urdf-reset').addEventListener('click',resetUrdfCamera);
+    $('urdf-file-input').addEventListener('change',async e=>{
+        const files = e.target.files;
+        if (files?.length) {
+            try { await uploadUrdfBundle(files, guessRootUrdf(files)); }
+            catch (_e) {}
+        }
+        e.target.value = '';
+    });
+    $('urdf-dir-input').addEventListener('change',async e=>{
+        const files = e.target.files;
+        if (files?.length) {
+            try { await uploadUrdfBundle(files, guessRootUrdf(files)); }
+            catch (_e) {}
+        }
+        e.target.value = '';
+    });
     $('sel-all').addEventListener('change',e=>toggleSelAll(e.target.checked));
     $('ds-path').addEventListener('keydown',e=>{if(e.key==='Enter')loadDataset();});
     $('fr-to').addEventListener('keydown',e=>{if(e.key==='Enter')addFrameRange();});
@@ -601,4 +1486,24 @@ document.addEventListener('DOMContentLoaded',()=>{
             case'End':e.preventDefault();videoStep(Infinity);break;
         }
     });
+});
+
+Object.assign(window, {
+    viewEpisode,
+    videoStep,
+    videoToggle,
+    onSliderInput,
+    toggleEpSel,
+    toggleJt,
+    toggleJtGrp,
+    applyRecommendation,
+    forceDeleteAll,
+    closeAnalysisModal,
+    closeJointMappingModal,
+    confirmJointMapping,
+    resetAutoMapping,
+    showJointMappingModal,
+    rmRange,
+    setChartMode,
+    resetZoom,
 });

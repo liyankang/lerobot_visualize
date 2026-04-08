@@ -19,7 +19,10 @@ import argparse
 import shlex
 import subprocess
 import threading
-from pathlib import Path
+import tempfile
+import uuid
+import xml.etree.ElementTree as ET
+from pathlib import Path, PurePosixPath
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Flask, render_template, request, jsonify, send_file, abort
@@ -49,6 +52,7 @@ _save_progress = {
     "current": 0,
     "total": 0,
 }
+_urdf_assets = {}
 
 
 def set_save_progress(stage, title, detail="", current=0, total=0, active=True):
@@ -73,6 +77,66 @@ def get_save_progress():
     else:
         data["percent"] = None
     return data
+
+
+def _safe_upload_rel_path(raw_path: str, fallback_name: str) -> str:
+    """规范化上传资源的相对路径，阻止路径穿越。"""
+    candidate = (raw_path or fallback_name or "").replace("\\", "/").strip()
+    candidate = candidate.lstrip("/")
+    if not candidate:
+        candidate = Path(fallback_name or "upload.bin").name
+
+    path = PurePosixPath(candidate)
+    if any(part in ("", ".", "..") for part in path.parts):
+        return Path(fallback_name or "upload.bin").name
+    return str(path)
+
+
+def _inspect_urdf(urdf_path: Path):
+    """解析 URDF 基本信息，用于前端做关节匹配和状态提示。
+
+    返回每个关节的类型、轴向和限位信息，供前端做单位检测和映射诊断。
+    """
+    root = ET.parse(urdf_path).getroot()
+    if root.tag != "robot":
+        raise ValueError("URDF 根节点必须是 <robot>")
+
+    joints = []
+    movable_joints = []
+    joint_info = {}
+    for joint in root.findall("joint"):
+        name = (joint.get("name") or "").strip()
+        joint_type = (joint.get("type") or "").strip().lower()
+        if not name:
+            continue
+        joints.append(name)
+
+        info = {"type": joint_type}
+        axis_el = joint.find("axis")
+        if axis_el is not None:
+            try:
+                info["axis"] = [float(x) for x in
+                                (axis_el.get("xyz") or "0 0 1").split()]
+            except ValueError:
+                pass
+        limit_el = joint.find("limit")
+        if limit_el is not None:
+            try:
+                info["lower"] = float(limit_el.get("lower", 0))
+                info["upper"] = float(limit_el.get("upper", 0))
+            except ValueError:
+                pass
+        joint_info[name] = info
+
+        if joint_type != "fixed":
+            movable_joints.append(name)
+
+    return {
+        "robot_name": (root.get("name") or urdf_path.stem).strip() or urdf_path.stem,
+        "joint_names": joints,
+        "movable_joint_names": movable_joints,
+        "joint_info": joint_info,
+    }
 
 # 关节名称 (CR100 双臂灵巧手, 与 rosbag2lerobot 转换器一致)
 JOINT_GROUPS = {
@@ -1376,6 +1440,96 @@ def api_video():
     if not p.exists():
         abort(404)
     return send_file(str(p), mimetype="video/mp4")
+
+
+@app.route("/api/urdf/upload", methods=["POST"])
+def api_urdf_upload():
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "请至少上传一个 URDF 相关文件"}), 400
+
+    manifest_raw = request.form.get("manifest", "").strip()
+    try:
+        manifest = json.loads(manifest_raw) if manifest_raw else []
+    except json.JSONDecodeError:
+        return jsonify({"error": "上传清单格式无效"}), 400
+
+    if manifest and len(manifest) != len(files):
+        return jsonify({"error": "上传文件与清单数量不一致"}), 400
+
+    package_id = uuid.uuid4().hex
+    package_dir = Path(tempfile.mkdtemp(prefix=f"urdf_{package_id}_", dir="/tmp"))
+
+    saved_paths = []
+    urdf_candidates = []
+    for idx, storage in enumerate(files):
+        fallback_name = Path(storage.filename or f"upload_{idx}").name
+        rel_path = (
+            manifest[idx].get("path")
+            if idx < len(manifest) and isinstance(manifest[idx], dict)
+            else None
+        )
+        rel_path = _safe_upload_rel_path(rel_path, fallback_name)
+        dst = package_dir / rel_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        storage.save(dst)
+        saved_paths.append(rel_path)
+        if dst.suffix.lower() == ".urdf":
+            urdf_candidates.append(rel_path)
+
+    if not urdf_candidates:
+        shutil.rmtree(package_dir, ignore_errors=True)
+        return jsonify({"error": "未检测到 .urdf 文件"}), 400
+
+    root_rel = request.form.get("root_file", "").strip()
+    root_rel = _safe_upload_rel_path(root_rel, urdf_candidates[0]) if root_rel else ""
+    if not root_rel or root_rel not in urdf_candidates:
+        root_rel = sorted(urdf_candidates)[0]
+
+    root_path = package_dir / root_rel
+    try:
+        info = _inspect_urdf(root_path)
+    except Exception as e:
+        shutil.rmtree(package_dir, ignore_errors=True)
+        return jsonify({"error": f"URDF 解析失败: {e}"}), 400
+
+    _urdf_assets[package_id] = {
+        "dir": package_dir,
+        "root_file": root_rel,
+        "files": saved_paths,
+        **info,
+    }
+
+    return jsonify({
+        "success": True,
+        "package_id": package_id,
+        "robot_name": info["robot_name"],
+        "root_file": root_rel,
+        "joint_names": info["joint_names"],
+        "movable_joint_names": info["movable_joint_names"],
+        "joint_info": info.get("joint_info", {}),
+        "asset_root": f"/api/urdf_asset/{package_id}",
+        "root_url": f"/api/urdf_asset/{package_id}/{root_rel}",
+    })
+
+
+@app.route("/api/urdf_asset/<package_id>/<path:rel_path>")
+def api_urdf_asset(package_id, rel_path):
+    package = _urdf_assets.get(package_id)
+    if package is None:
+        abort(404)
+
+    base_dir = Path(package["dir"]).resolve()
+    safe_rel = _safe_upload_rel_path(rel_path, Path(rel_path).name)
+    target = (base_dir / safe_rel).resolve()
+    try:
+        target.relative_to(base_dir)
+    except ValueError:
+        abort(403)
+
+    if not target.exists() or not target.is_file():
+        abort(404)
+    return send_file(str(target))
 
 
 @app.route("/api/delete_episodes", methods=["POST"])
