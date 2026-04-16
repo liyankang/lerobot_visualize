@@ -3,3 +3,6 @@ pandas>=1.5
 pyarrow>=10.0
 numpy>=1.21
 scipy>=1.9
+pyyaml>=5.0
+opencv-python>=4.5
+rosbags>=0.9

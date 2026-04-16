@@ -14,9 +14,10 @@ const S = {
     dataset: null, episodes: [], curEp: null, curEpData: null,
     selEpisodes: new Set(), selFrames: new Set(),
     jointNames: [], jointGroups: {}, activeJoints: new Set(),
+    mergeDatasets: [],
     chart: null,            // 合并后的单一图表
     chartMode: 'both',      // 'both' | 'state' | 'action'
-    videoPlaying: false, videoFrame: 0, videoTotalFrames: 0, videoTimer: null,
+    videoPlaying: false, videoFrame: 0, videoTotalFrames: 0, videoTimer: null, videoRaf: null,
     chartClickState: 0,     // 0=空闲, 1=等待结束帧
     bridgePreview: [],      // 桥接帧预览 (分析模态框打开时高亮)
     uiLocked: false,        // 保存期间锁住页面交互
@@ -419,6 +420,7 @@ async function loadDataset() {
     S.jointNames=d.joint_names; S.jointGroups=d.joint_groups;
     S.selEpisodes.clear(); S.selFrames.clear();
     S.curEp=null; S.curEpData=null;
+    S.mergeDatasets = [];
     S.activeJoints = new Set(d.joint_names.slice(0,7));
     if (S.urdf.packageId) {
         S.urdf.jointMap = buildUrdfJointMap(S.jointNames, S.urdf.jointNames);
@@ -429,9 +431,36 @@ async function loadDataset() {
         updateUrdfUploadStatus(`已加载 ${S.urdf.robotName || 'URDF'}，${mapping.text}`);
         if (S.urdf.jointMap.length) showJointMappingModal();
     }
-    renderSummary(); renderEpList(); renderJointSel(); hideDetail();
+    renderSummary(); renderMergeQueue(); renderEpList(); renderJointSel(); hideDetail();
     $('save-path').value = path+'_edited';
     toast(`已加载: ${d.summary.total_episodes} ep, ${d.summary.total_frames} 帧`,'success');
+}
+
+async function addMergeDataset() {
+    if (S.uiLocked) return;
+    if (!S.dataset) return toast('请先加载主数据集','error');
+    const path = $('merge-path').value.trim();
+    if (!path) return toast('请输入待拼接数据集路径','error');
+    if (path === S.dataset.path) return toast('不能把当前主数据集再次追加到自己后面','error');
+    if (S.mergeDatasets.some(item => item.path === path)) return toast('该数据集已经在拼接队列中','info');
+
+    toast('正在检查待拼接数据集...','info');
+    const data = await post('/api/merge/inspect', { path });
+    S.mergeDatasets.push({
+        path,
+        basename: data.basename || path.split('/').pop() || path,
+        summary: data.summary,
+    });
+    $('merge-path').value = '';
+    renderSummary();
+    renderMergeQueue();
+    toast(`已加入拼接队列: ${data.basename || path}`,'success');
+}
+
+function removeMergeDataset(path) {
+    S.mergeDatasets = S.mergeDatasets.filter(item => item.path !== path);
+    renderSummary();
+    renderMergeQueue();
 }
 
 async function viewEpisode(idx) {
@@ -585,12 +614,19 @@ async function doSave() {
     if (S.uiLocked) return;
     const p = $('save-path').value.trim();
     if (!p) return toast('请输入保存路径','error');
-    if (!confirm(`保存到:\n${p}\n\n已有路径将被覆盖!`)) return;
+    const appendCount = S.mergeDatasets.length;
+    const appendMsg = appendCount
+        ? `\n\n将按顺序追加拼接 ${appendCount} 个数据集:\n${S.mergeDatasets.map(item => `- ${item.path}`).join('\n')}`
+        : '';
+    if (!confirm(`保存到:\n${p}\n\n已有路径将被覆盖!${appendMsg}`)) return;
     lockUI('正在保存数据集', '正在写入 Parquet、导出视频并重算统计信息，请稍候...');
     startSaveProgressPolling();
     toast('正在保存 (含统计重算)...','info');
     try {
-        const d = await post('/api/save',{output_path:p});
+        const d = await post('/api/save',{
+            output_path:p,
+            append_paths: S.mergeDatasets.map(item => item.path),
+        });
         updateLoadingProgress({
             title: '保存完成',
             detail: `数据集已保存到: ${d.path}`,
@@ -1065,21 +1101,104 @@ function resetAutoMapping() {
 // ═══════════════════════ 视频同步 ═══════════════════════
 
 const getVids = () => Array.from(document.querySelectorAll('#vw video'));
+const getMasterVideo = () => getVids()[0] || null;
+
+function cancelVideoRaf() {
+    if (S.videoRaf) {
+        cancelAnimationFrame(S.videoRaf);
+        S.videoRaf = null;
+    }
+}
+
+function syncAuxVideos(targetTime, toleranceSec = 0.05) {
+    const vids = getVids();
+    if (vids.length <= 1) return;
+    for (const v of vids.slice(1)) {
+        if (Math.abs(v.currentTime - targetTime) > toleranceSec) {
+            v.currentTime = targetTime;
+        }
+    }
+}
+
+function renderPlaybackFrame() {
+    const sl=$('vs'); if(sl) sl.value=S.videoFrame;
+    const lb=$('vfl'); if(lb) lb.textContent=`${S.videoFrame} / ${Math.max(0,S.videoTotalFrames-1)}`;
+    refreshChart();
+    renderFrameValues(S.videoFrame);
+    const prevDetected = S.urdf._detectedDegree;
+    syncUrdfPose();
+    if (prevDetected === null && S.urdf._detectedDegree !== null) renderUrdfPanel();
+}
+
+function startVideoLoop() {
+    cancelVideoRaf();
+    const fps = S.dataset ? S.dataset.fps : 30;
+    const master = getMasterVideo();
+
+    const tick = () => {
+        if (!S.videoPlaying) {
+            S.videoRaf = null;
+            return;
+        }
+
+        let frameChanged = false;
+        if (master && Number.isFinite(master.currentTime)) {
+            syncAuxVideos(master.currentTime);
+            const nextFrame = Math.max(0, Math.min(
+                S.videoTotalFrames - 1,
+                Math.round(master.currentTime * fps),
+            ));
+            frameChanged = nextFrame !== S.videoFrame;
+            S.videoFrame = nextFrame;
+        } else if (S.videoFrame >= S.videoTotalFrames - 1) {
+            videoPause();
+            return;
+        }
+
+        if (frameChanged || !master) renderPlaybackFrame();
+        if (S.videoFrame >= S.videoTotalFrames - 1) {
+            videoPause();
+            return;
+        }
+        S.videoRaf = requestAnimationFrame(tick);
+    };
+
+    S.videoRaf = requestAnimationFrame(tick);
+}
+
 function videoToggle() { S.videoPlaying ? videoPause() : videoPlay(); }
 
 function videoPlay() {
     if (S.videoPlaying || S.videoTotalFrames<=0) return;
     S.videoPlaying=true; $('btn-vp').textContent='⏸';
-    const iv = 1000/(S.dataset?S.dataset.fps:30);
+    const fps = S.dataset ? S.dataset.fps : 30;
+    const targetTime = S.videoFrame / fps;
+    const vids = getVids();
+    if (vids.length) {
+        for (const v of vids) {
+            v.currentTime = targetTime;
+            const playPromise = v.play();
+            if (playPromise && typeof playPromise.catch === 'function') {
+                playPromise.catch(() => {});
+            }
+        }
+        startVideoLoop();
+        return;
+    }
+
+    const iv = 1000 / fps;
     S.videoTimer = setInterval(()=>{
         if (S.videoFrame>=S.videoTotalFrames-1) { videoPause(); return; }
-        S.videoFrame++; videoSync();
+        S.videoFrame++;
+        renderPlaybackFrame();
     }, iv);
 }
 
 function videoPause() {
     S.videoPlaying=false;
     if (S.videoTimer) { clearInterval(S.videoTimer); S.videoTimer=null; }
+    cancelVideoRaf();
+    for (const v of getVids()) v.pause();
     const b=$('btn-vp'); if(b) b.textContent='▶';
 }
 
@@ -1093,20 +1212,10 @@ function videoStep(d) {
 
 function videoSync() {
     const fps=S.dataset?S.dataset.fps:30;
-    let t;
-    if (S.curEpData && S.curEpData.frames && S.videoFrame < S.curEpData.frames.length) {
-        t = S.curEpData.frames[S.videoFrame].timestamp;
-    } else {
-        t = S.videoFrame / fps;
-    }
+    // 与恒定 FPS、按帧序编码的 MP4 对齐；仅在跳帧/拖动时 seek，避免播放时持续 currentTime 触发高成本解码。
+    const t = S.videoFrame / fps;
     for (const v of getVids()) v.currentTime=t;
-    const sl=$('vs'); if(sl) sl.value=S.videoFrame;
-    const lb=$('vfl'); if(lb) lb.textContent=`${S.videoFrame} / ${Math.max(0,S.videoTotalFrames-1)}`;
-    refreshChart();
-    renderFrameValues(S.videoFrame);
-    const prevDetected = S.urdf._detectedDegree;
-    syncUrdfPose();
-    if (prevDetected === null && S.urdf._detectedDegree !== null) renderUrdfPanel();
+    renderPlaybackFrame();
 }
 
 function onSliderInput(v) { videoPause(); S.videoFrame=parseInt(v)||0; videoSync(); }
@@ -1115,13 +1224,30 @@ function onSliderInput(v) { videoPause(); S.videoFrame=parseInt(v)||0; videoSync
 
 function renderSummary() {
     const s=S.dataset; if(!s) return;
+    const mergeFrames = S.mergeDatasets.reduce((sum, item) => sum + (item.summary?.total_frames || 0), 0);
     $('si').innerHTML =
         `<span>FPS:<b>${s.fps}</b></span>`+
         `<span>机器人:<b>${s.robot_type}</b></span>`+
         `<span>Episodes:<b>${s.total_episodes}</b></span>`+
         `<span>帧:<b>${s.total_frames}</b></span>`+
         `<span>摄像头:${s.cameras.length?s.cameras.join(','):'无'}</span>`+
+        (S.mergeDatasets.length ? ` <span class="bm">待拼接 ${S.mergeDatasets.length} 个 / ${mergeFrames} 帧</span>` : '')+
         (s.modified?' <span class="bw">已修改</span>':'');
+}
+
+function renderMergeQueue() {
+    const el = $('merge-list');
+    if (!el) return;
+    if (!S.mergeDatasets.length) {
+        el.innerHTML = '';
+        return;
+    }
+    el.innerHTML = S.mergeDatasets.map(item => `
+        <span class="merge-tag" title="${item.path}">
+            <span>${item.basename} · ${item.summary?.total_episodes || 0} ep / ${item.summary?.total_frames || 0} 帧</span>
+            <button type="button" onclick="removeMergeDataset(${JSON.stringify(item.path)})">×</button>
+        </span>
+    `).join('');
 }
 
 function renderEpList() {
@@ -1427,12 +1553,140 @@ function compressRanges(sorted) {
 }
 function toast(m,t='info') { const b=$('tb'),e=document.createElement('div'); e.className=`tt t${t[0]}`; e.textContent=m; b.appendChild(e); setTimeout(()=>e.remove(),3500); }
 
+// ═══════════════════════ 目录浏览器 ═══════════════════════
+
+async function openDirBrowser(targetInputId) {
+    const inputEl = $(targetInputId);
+    let currentPath = inputEl.value.trim() || '';
+
+    async function fetchDirs(path) {
+        const params = path ? `?path=${encodeURIComponent(path)}` : '';
+        const resp = await fetch(`/api/browse${params}`);
+        return resp.json();
+    }
+
+    async function render(path) {
+        const data = await fetchDirs(path);
+        if (data.error) {
+            toast(data.error, 'error');
+            if (path) return render('');
+            return;
+        }
+        currentPath = data.current || '';
+        pathInput.value = currentPath;
+
+        listEl.innerHTML = '';
+        if (!data.dirs.length) {
+            listEl.innerHTML = '<div class="dir-empty">此目录下无子目录</div>';
+            return;
+        }
+        for (const d of data.dirs) {
+            const item = document.createElement('div');
+            item.className = 'dir-item';
+            item.innerHTML = `<span class="dir-item-icon">&#128194;</span><span class="dir-item-name">${escHtml(d.name)}</span>`;
+            item.addEventListener('click', () => render(d.path));
+            listEl.appendChild(item);
+        }
+    }
+
+    function escHtml(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    // Build modal
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+
+    const card = document.createElement('div');
+    card.className = 'modal-card';
+    card.style.width = '600px';
+
+    // Header
+    const hdr = document.createElement('div');
+    hdr.className = 'modal-hdr';
+    hdr.innerHTML = '<h3 style="color:#333;">选择目录</h3>';
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'modal-close';
+    closeBtn.textContent = '\u00d7';
+    closeBtn.addEventListener('click', () => overlay.remove());
+    hdr.appendChild(closeBtn);
+
+    // Body
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+
+    const pathRow = document.createElement('div');
+    pathRow.className = 'dir-browser-path';
+
+    const upBtn = document.createElement('button');
+    upBtn.textContent = '\u2191 上级';
+    upBtn.addEventListener('click', async () => {
+        const data = await fetchDirs(currentPath);
+        if (data.parent !== undefined && data.parent !== currentPath) {
+            render(data.parent);
+        }
+    });
+
+    const pathInput = document.createElement('input');
+    pathInput.value = currentPath;
+    pathInput.placeholder = '输入路径后按回车跳转...';
+    pathInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') render(pathInput.value.trim());
+    });
+
+    pathRow.appendChild(upBtn);
+    pathRow.appendChild(pathInput);
+
+    const listEl = document.createElement('div');
+    listEl.className = 'dir-list';
+
+    body.appendChild(pathRow);
+    body.appendChild(listEl);
+
+    // Footer
+    const footer = document.createElement('div');
+    footer.className = 'modal-footer';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'bp';
+    cancelBtn.style.cssText = 'background:#999;';
+    cancelBtn.textContent = '取消';
+    cancelBtn.addEventListener('click', () => overlay.remove());
+
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'bp';
+    confirmBtn.textContent = '选择此目录';
+    confirmBtn.addEventListener('click', () => {
+        inputEl.value = currentPath;
+        overlay.remove();
+    });
+
+    footer.appendChild(cancelBtn);
+    footer.appendChild(confirmBtn);
+
+    card.appendChild(hdr);
+    card.appendChild(body);
+    card.appendChild(footer);
+    overlay.appendChild(card);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+
+    render(currentPath);
+}
+
 // ═══════════════════════ 初始化 ═══════════════════════
 
 document.addEventListener('DOMContentLoaded',()=>{
     renderUrdfPanel();
+    renderMergeQueue();
     $('btn-load').addEventListener('click',loadDataset);
+    $('btn-merge-add').addEventListener('click',addMergeDataset);
     $('btn-save').addEventListener('click',doSave);
+    $('btn-browse-ds').addEventListener('click',()=>openDirBrowser('ds-path'));
+    $('btn-browse-merge').addEventListener('click',()=>openDirBrowser('merge-path'));
+    $('btn-browse-save').addEventListener('click',()=>openDirBrowser('save-path'));
     $('btn-del-ep').addEventListener('click',doDeleteEp);
     $('btn-del-fr').addEventListener('click',doDeleteFrames);
     $('btn-add-rng').addEventListener('click',addFrameRange);
@@ -1470,6 +1724,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     });
     $('sel-all').addEventListener('change',e=>toggleSelAll(e.target.checked));
     $('ds-path').addEventListener('keydown',e=>{if(e.key==='Enter')loadDataset();});
+    $('merge-path').addEventListener('keydown',e=>{if(e.key==='Enter')addMergeDataset();});
     $('fr-to').addEventListener('keydown',e=>{if(e.key==='Enter')addFrameRange();});
     document.addEventListener('keydown',e=>{
         if (S.uiLocked) {

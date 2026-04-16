@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LeRobot 工具箱</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f0f2f5; color: #333;
+            min-height: 100vh; display: flex; flex-direction: column;
+        }
+
+        header {
+            background: #1a1a2e; color: #eee;
+            padding: 16px 24px; text-align: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
+        header h1 { font-size: 22px; font-weight: 700; letter-spacing: 1px; }
+        header p { font-size: 13px; color: #aab; margin-top: 4px; }
+
+        .portal {
+            flex: 1; display: flex; justify-content: center; align-items: center;
+            padding: 40px 24px; gap: 40px; flex-wrap: wrap;
+        }
+
+        .card {
+            background: #fff; border-radius: 16px;
+            width: 320px; padding: 48px 32px;
+            text-align: center; text-decoration: none; color: #333;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer; display: block;
+        }
+        .card:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 8px 28px rgba(0,0,0,0.15);
+        }
+
+        .card .icon {
+            width: 80px; height: 80px; margin: 0 auto 20px;
+            border-radius: 20px; display: flex; align-items: center; justify-content: center;
+        }
+        .card .icon svg { width: 44px; height: 44px; }
+
+        .card .icon-vis { background: linear-gradient(135deg, #667eea, #764ba2); }
+        .card .icon-ros { background: linear-gradient(135deg, #f093fb, #f5576c); }
+        .card .icon-analysis { background: linear-gradient(135deg, #36d1dc, #2563eb); }
+
+        .card h2 { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
+        .card p { font-size: 13px; color: #666; line-height: 1.6; }
+
+        .card .badge {
+            display: inline-block; margin-top: 16px; padding: 4px 12px;
+            border-radius: 12px; font-size: 11px; font-weight: 600;
+        }
+        .badge-ready { background: #e8f5e9; color: #2e7d32; }
+        .badge-wip { background: #fff3e0; color: #e65100; }
+
+        footer {
+            text-align: center; padding: 16px; font-size: 12px; color: #999;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>LeRobot 工具箱</h1>
+        <p>LeRobot v2.1 数据集工具集合</p>
+    </header>
+
+    <div class="portal">
+        <a class="card" href="/visualize">
+            <div class="icon icon-vis">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                </svg>
+            </div>
+            <h2>可视化编辑器</h2>
+            <p>浏览、编辑 LeRobot v2.1 数据集。支持关节轨迹可视化、URDF 3D 回放、帧级编辑与智能平滑分析。</p>
+            <span class="badge badge-ready">可用</span>
+        </a>
+
+        <a class="card" href="/ros2-convert">
+            <div class="icon icon-ros">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="16 3 21 3 21 8"/>
+                    <line x1="4" y1="20" x2="21" y2="3"/>
+                    <polyline points="21 16 21 21 16 21"/>
+                    <line x1="15" y1="15" x2="21" y2="21"/>
+                    <line x1="4" y1="4" x2="9" y2="9"/>
+                </svg>
+            </div>
+            <h2>ROS2 数据转换</h2>
+            <p>将 ROS2 bag 数据转换为 LeRobot v2.1 格式数据集，支持话题映射与时间戳对齐。</p>
+            <span class="badge badge-wip">开发中</span>
+        </a>
+
+        <a class="card" href="/data-analysis">
+            <div class="icon icon-analysis">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19h16"/>
+                    <path d="M7 15l3-3 3 2 4-6"/>
+                    <circle cx="7" cy="15" r="1"/>
+                    <circle cx="10" cy="12" r="1"/>
+                    <circle cx="13" cy="14" r="1"/>
+                    <circle cx="17" cy="8" r="1"/>
+                </svg>
+            </div>
+            <h2>LeRobot 数据分析</h2>
+            <p>从 VLA 视角分析关节分布、时序平滑性、物理约束、多模态对齐、任务结构与可学习性。</p>
+            <span class="badge badge-ready">可用</span>
+        </a>
+    </div>
+
+    <footer>LeRobot Toolbox</footer>
+</body>
+</html>

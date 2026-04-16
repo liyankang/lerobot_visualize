@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>LeRobot 数据集编辑器</title>
+    <title>可视化编辑器 - LeRobot 工具箱</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
     <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1"></script>
@@ -34,6 +34,23 @@
             font-size: 11px; color: #9fb3c8; min-width: 180px;
             max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
+        .hdr-merge-list {
+            display: flex; flex-wrap: wrap; gap: 6px; width: 100%;
+        }
+        .merge-tag {
+            display: inline-flex; align-items: center; gap: 6px;
+            max-width: 320px; padding: 3px 8px; border-radius: 999px;
+            background: rgba(255,255,255,0.08); color: #dbe7f5; font-size: 11px;
+            border: 1px solid rgba(255,255,255,0.14);
+        }
+        .merge-tag span {
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .merge-tag button {
+            padding: 0; min-width: 0; background: none; color: #dbe7f5;
+            font-size: 14px; line-height: 1; border: none;
+        }
+        .merge-tag button:hover { opacity: 0.7; }
         .sep { width:1px; height:20px; background:#444; }
 
         /* ── Buttons ── */
@@ -55,6 +72,7 @@
         }
         #sbar span { display: inline-flex; align-items: center; gap: 3px; }
         .bw { background:#f39c12; color:#fff; padding:1px 7px; border-radius:10px; font-size:10px; }
+        .bm { background:#2563eb; color:#fff; padding:1px 7px; border-radius:10px; font-size:10px; }
 
         /* ── Main ── */
         main { display: flex; flex: 1; overflow: hidden; }
@@ -359,22 +377,63 @@
         .tt { padding:7px 14px; border-radius:5px; font-size:12px; color:#fff; box-shadow:0 2px 6px rgba(0,0,0,0.2); animation:fs .2s; pointer-events:auto; }
         .ti { background:#3498db; } .ts { background:#27ae60; } .te { background:#e74c3c; }
         @keyframes fs { from{opacity:0;transform:translateY(-6px)} to{opacity:1} }
+
+        /* ── Directory Browser Modal ── */
+        .dir-browser-path {
+            display:flex; align-items:center; gap:6px; padding:8px 0;
+        }
+        .dir-browser-path input {
+            flex:1; padding:5px 8px; border:1px solid #ddd; border-radius:4px;
+            font-size:12px; font-family:monospace;
+        }
+        .dir-browser-path button {
+            padding:4px 10px; border:1px solid #ddd; border-radius:4px;
+            background:#f8f9fa; cursor:pointer; font-size:12px; white-space:nowrap;
+        }
+        .dir-browser-path button:hover { background:#e9ecef; }
+        .dir-list {
+            border:1px solid #eee; border-radius:6px; max-height:400px;
+            overflow-y:auto; background:#fafafa;
+        }
+        .dir-item {
+            display:flex; align-items:center; gap:8px;
+            padding:8px 12px; cursor:pointer; font-size:13px;
+            border-bottom:1px solid #f0f0f0; transition:background .1s;
+        }
+        .dir-item:last-child { border-bottom:none; }
+        .dir-item:hover { background:#e8f4fd; }
+        .dir-item-icon { font-size:16px; flex-shrink:0; }
+        .dir-item-name { flex:1; word-break:break-all; }
+        .dir-empty {
+            padding:24px; text-align:center; color:#999; font-size:13px;
+        }
     </style>
 </head>
 <body>
 
 <header>
+    <a href="/" style="color:#aab;text-decoration:none;font-size:13px;display:flex;align-items:center;gap:4px;margin-right:4px;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        工具箱
+    </a>
     <h1>LeRobot 数据集编辑器</h1>
     <div class="hdr-c">
         <input id="ds-path" class="pi" placeholder="数据集路径 (如 /data/lerobot/my_dataset)">
+        <button class="bp" id="btn-browse-ds" title="浏览目录">&#128193;</button>
         <button class="bp" id="btn-load">加载</button>
         <div class="sep"></div>
+        <input id="merge-path" class="pi" placeholder="追加拼接的数据集路径...">
+        <button class="bp" id="btn-browse-merge" title="浏览目录">&#128193;</button>
+        <button class="bp" id="btn-merge-add">追加拼接</button>
+        <div class="sep"></div>
         <input id="save-path" class="pi" placeholder="另存路径...">
+        <button class="bp" id="btn-browse-save" title="浏览目录">&#128193;</button>
         <button class="bs" id="btn-save">另存为</button>
         <div class="sep"></div>
         <button class="bp" id="btn-urdf-file">上传 URDF</button>
-        <button class="bg" id="btn-urdf-dir">上传目录</button>
+        <button class="bg" id="btn-urdf-dir">上传 URDF+MESH 目录</button>
         <span class="hdr-status" id="urdf-upload-status">未加载 URDF</span>
+        <div id="merge-list" class="hdr-merge-list"></div>
     </div>
 </header>
 

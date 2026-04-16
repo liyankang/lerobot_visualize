@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ROS2 数据转换 - LeRobot 工具箱</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f0f2f5; color: #333;
+            min-height: 100vh; display: flex; flex-direction: column;
+        }
+
+        /* ── Header ── */
+        header {
+            background: #1a1a2e; color: #eee;
+            padding: 12px 24px; display: flex; align-items: center; gap: 16px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3); flex-shrink: 0;
+        }
+        header a {
+            color: #aab; text-decoration: none; font-size: 13px;
+            display: flex; align-items: center; gap: 4px;
+        }
+        header a:hover { color: #fff; }
+        header a svg { width: 16px; height: 16px; }
+        header h1 { font-size: 15px; font-weight: 600; }
+
+        /* ── Step Indicator ── */
+        .step-indicator {
+            display: flex; justify-content: center; gap: 0; padding: 20px 24px 0;
+            flex-shrink: 0;
+        }
+        .step-indicator .step {
+            display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+            font-size: 13px; color: #999; position: relative;
+        }
+        .step-indicator .step .num {
+            width: 26px; height: 26px; border-radius: 50%;
+            background: #ddd; color: #fff; font-size: 12px; font-weight: 700;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .step-indicator .step.active .num { background: #667eea; }
+        .step-indicator .step.active { color: #333; font-weight: 600; }
+        .step-indicator .step.done .num { background: #27ae60; }
+        .step-indicator .step.done { color: #666; }
+        .step-indicator .step + .step::before {
+            content: ''; position: absolute; left: -16px; top: 50%;
+            width: 32px; height: 2px; background: #ddd; transform: translateY(-50%);
+        }
+        .step-indicator .step.done + .step::before,
+        .step-indicator .step.active + .step::before { background: #667eea; }
+
+        /* ── Main ── */
+        .main-content {
+            flex: 1; max-width: 900px; width: 100%; margin: 0 auto;
+            padding: 20px 24px; overflow-y: auto;
+        }
+
+        /* ── Step Panels ── */
+        .step-panel { display: none; }
+        .step-panel.active { display: block; }
+
+        .panel-card {
+            background: #fff; border-radius: 10px; padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 16px;
+        }
+        .panel-card h3 {
+            font-size: 15px; margin-bottom: 12px; color: #333;
+            border-bottom: 1px solid #f0f0f0; padding-bottom: 8px;
+        }
+        .panel-card h4 {
+            font-size: 13px; color: #666; margin: 12px 0 8px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+
+        /* ── Forms ── */
+        .input-row {
+            display: flex; gap: 8px; align-items: center; margin-bottom: 12px;
+        }
+        .input-row input[type="text"], .input-row input[type="number"] {
+            flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 13px;
+        }
+        .input-row input:focus { outline: none; border-color: #667eea; }
+        textarea {
+            width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 13px; resize: vertical; min-height: 40px;
+        }
+
+        .r2-btn {
+            padding: 8px 18px; border: none; border-radius: 6px; font-size: 13px;
+            font-weight: 600; cursor: pointer; transition: all .15s;
+        }
+        .r2-btn.primary { background: #667eea; color: #fff; }
+        .r2-btn.primary:hover { background: #5a6fd6; }
+        .r2-btn.primary:disabled { background: #b0b8d9; cursor: not-allowed; }
+        .r2-btn.secondary { background: #e9ecef; color: #555; }
+        .r2-btn.secondary:hover { background: #dee2e6; }
+        .r2-btn.success { background: #27ae60; color: #fff; }
+        .r2-btn.success:hover { background: #219a52; }
+        .r2-btn.browse {
+            padding: 8px 12px; background: #f8f9fa; border: 1px solid #ddd;
+            border-radius: 6px; cursor: pointer; font-size: 15px;
+        }
+        .r2-btn.browse:hover { background: #e9ecef; }
+
+        .btn-row { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+
+        /* ── Bag List ── */
+        .bag-item {
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 12px; border-bottom: 1px solid #f5f5f5; font-size: 13px;
+        }
+        .bag-item:hover { background: #f8f9fa; }
+        .bag-name { font-weight: 600; flex: 1; }
+        .bag-info { color: #999; font-size: 12px; }
+
+        /* ── Topic Table ── */
+        .r2-table {
+            width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px;
+        }
+        .r2-table th {
+            background: #f8f9fa; padding: 8px 10px; text-align: left;
+            font-weight: 600; border-bottom: 2px solid #eee;
+        }
+        .r2-table td {
+            padding: 6px 10px; border-bottom: 1px solid #f0f0f0;
+        }
+        .r2-table tr:hover { background: #fafbfc; }
+        .r2-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+        .cat-tag {
+            padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+        }
+        .cat-camera .cat-tag, .cat-tag.cat-camera { background: #e3f2fd; color: #1565c0; }
+        .cat-joint_state .cat-tag, .cat-tag.cat-joint_state { background: #e8f5e9; color: #2e7d32; }
+        .cat-other .cat-tag, .cat-tag.cat-other { background: #f3e5f5; color: #7b1fa2; }
+        .msg-type { font-size: 11px; color: #888; }
+
+        .ver-badge {
+            display: inline-block; padding: 3px 10px; border-radius: 10px;
+            background: #667eea; color: #fff; font-size: 12px; font-weight: 600;
+            text-transform: capitalize; margin-right: 10px;
+        }
+        #ros-version-info { margin-bottom: 12px; font-size: 12px; color: #666; }
+        #ros-version-info span { margin-right: 12px; }
+
+        /* ── Mapping Config (Step 3) ── */
+        .map-row {
+            display: flex; align-items: center; gap: 10px; padding: 8px 0;
+            border-bottom: 1px solid #f5f5f5; font-size: 13px;
+        }
+        .map-row:last-child { border-bottom: none; }
+        .map-check { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+        .map-check code { word-break: break-all; }
+        .map-topic { word-break: break-all; flex: 1; min-width: 0; font-size: 12px; }
+        .map-arrow { color: #999; flex-shrink: 0; }
+        .map-name {
+            width: 260px; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px;
+            font-size: 12px; font-family: monospace;
+        }
+        .map-name:focus { outline: none; border-color: #667eea; }
+        .map-cb { display: flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; }
+        .map-freq { color: #999; font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+        .map-meta {
+            color: #666; font-size: 11px; white-space: nowrap; flex-shrink: 0;
+            background: #f8f9fa; border-radius: 999px; padding: 3px 8px;
+        }
+
+        .joint-map-tools {
+            display: flex; gap: 8px; align-items: center; margin: 10px 0 6px;
+            flex-wrap: wrap;
+        }
+        .joint-map-summary {
+            font-size: 12px; color: #666; margin-bottom: 10px;
+        }
+        .joint-map-card {
+            border: 1px solid #eceff3; border-radius: 10px; margin-top: 10px;
+            overflow: hidden;
+        }
+        .joint-map-card-hd {
+            display: flex; justify-content: space-between; gap: 12px; align-items: center;
+            padding: 10px 12px; background: #fafbfc; border-bottom: 1px solid #eceff3;
+        }
+        .joint-map-card-hd code { font-size: 12px; word-break: break-all; }
+        .joint-map-badge {
+            font-size: 11px; color: #385; background: #e8f5e9;
+            border-radius: 999px; padding: 3px 8px; white-space: nowrap;
+        }
+        .joint-map-empty {
+            padding: 14px 12px; color: #999; font-size: 12px;
+        }
+        .joint-map-table {
+            width: 100%; border-collapse: collapse; font-size: 12px;
+        }
+        .joint-map-table th, .joint-map-table td {
+            padding: 8px 10px; border-bottom: 1px solid #f2f4f7; text-align: left;
+            vertical-align: middle;
+        }
+        .joint-map-table th {
+            background: #fff; color: #666; font-weight: 600;
+        }
+        .joint-map-table tr:last-child td { border-bottom: none; }
+        .joint-map-table .num {
+            width: 52px; text-align: right; color: #666; font-variant-numeric: tabular-nums;
+        }
+        .joint-map-subgroup {
+            padding: 10px 12px 12px;
+            border-top: 1px solid #eef2f6;
+        }
+        .joint-map-subgroup:first-of-type {
+            border-top: none;
+        }
+        .joint-map-subgroup-hd {
+            font-size: 12px; font-weight: 700; color: #425466;
+            margin-bottom: 8px;
+        }
+        .joint-map-select {
+            width: 100%; padding: 6px 8px; border: 1px solid #d9dde5; border-radius: 6px;
+            background: #fff; font-size: 12px;
+        }
+        .joint-map-hint {
+            color: #888; font-size: 11px;
+        }
+
+        .cfg-row {
+            display: flex; align-items: center; gap: 12px; margin-bottom: 10px; font-size: 13px;
+        }
+        .cfg-row label { width: 100px; font-weight: 600; flex-shrink: 0; }
+        .cfg-row select, .cfg-row input {
+            padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;
+        }
+        .cfg-row select { min-width: 300px; }
+        .cfg-row input[type="number"] { width: 100px; }
+        #base-warning {
+            display: none; color: #e65100; font-size: 12px; margin-top: -6px; margin-bottom: 8px;
+            padding: 4px 8px; background: #fff3e0; border-radius: 4px;
+        }
+        .cfg-hint {
+            font-size: 12px; color: #666; margin: -4px 0 10px 112px;
+        }
+
+        /* ── Progress ── */
+        #progress-panel {
+            display: none; margin: 16px 0;
+        }
+        .progress-track {
+            width: 100%; height: 24px; background: #e9ecef; border-radius: 12px; overflow: hidden;
+        }
+        #progress-bar {
+            height: 100%; background: linear-gradient(90deg, #667eea, #764ba2);
+            color: #fff; font-size: 11px; font-weight: 700;
+            display: flex; align-items: center; justify-content: center;
+            transition: width .3s;
+            min-width: 0;
+        }
+        #progress-detail { font-size: 12px; color: #666; margin-top: 6px; }
+        .progress-meta {
+            display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px;
+            font-size: 12px; color: #666;
+        }
+        .progress-meta span {
+            background: #f8f9fa; border-radius: 999px; padding: 4px 10px;
+        }
+
+        /* ── Align Results ── */
+        #align-results { margin-top: 12px; }
+        .over-tol { color: #e74c3c; font-weight: 600; }
+        .warn-count {
+            display: inline-block; padding: 1px 6px; border-radius: 8px;
+            background: #fff3e0; color: #e65100; font-size: 11px;
+        }
+        .err-hdr { color: #e74c3c; margin-top: 12px; }
+        .err-item { font-size: 12px; color: #c0392b; padding: 4px 0; }
+
+        #convert-done {
+            display: none; padding: 16px; background: #e8f5e9; border-radius: 8px;
+            text-align: center; color: #2e7d32; font-weight: 600; margin-top: 12px;
+        }
+
+        /* ── Misc ── */
+        .r2-empty { padding: 16px; text-align: center; color: #999; font-size: 13px; }
+
+        /* ── Toast ── */
+        #r2-toast {
+            position: fixed; top: 48px; right: 12px; z-index: 9999;
+            display: flex; flex-direction: column; gap: 4px; pointer-events: none;
+        }
+        .r2-tt {
+            padding: 7px 14px; border-radius: 5px; font-size: 12px; color: #fff;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2); animation: r2fade .2s; pointer-events: auto;
+        }
+        .r2-ti { background: #3498db; }
+        .r2-ts { background: #27ae60; }
+        .r2-te { background: #e74c3c; }
+        @keyframes r2fade { from{opacity:0;transform:translateY(-6px)} to{opacity:1} }
+
+        /* ── Modal (directory browser) ── */
+        .modal-overlay {
+            position: fixed; inset: 0; z-index: 10000;
+            background: rgba(0,0,0,0.5); display: flex;
+            align-items: center; justify-content: center;
+        }
+        .modal-card {
+            background: #fff; border-radius: 10px; max-width: 92vw;
+            max-height: 80vh; display: flex; flex-direction: column;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        .modal-hdr {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 14px 18px; border-bottom: 1px solid #eee;
+        }
+        .modal-hdr h3 { font-size: 15px; margin: 0; }
+        .modal-close {
+            background: none; border: none; font-size: 22px; cursor: pointer;
+            color: #999; padding: 0 4px; line-height: 1;
+        }
+        .modal-close:hover { color: #333; }
+        .modal-body { padding: 14px 18px; overflow-y: auto; flex: 1; }
+        .modal-footer {
+            padding: 12px 18px; border-top: 1px solid #eee;
+            display: flex; gap: 8px; justify-content: flex-end;
+        }
+        .dir-browser-path {
+            display: flex; align-items: center; gap: 6px; padding: 8px 0;
+        }
+        .dir-browser-path input {
+            flex: 1; padding: 5px 8px; border: 1px solid #ddd; border-radius: 4px;
+            font-size: 12px; font-family: monospace;
+        }
+        .dir-browser-path button {
+            padding: 4px 10px; border: 1px solid #ddd; border-radius: 4px;
+            background: #f8f9fa; cursor: pointer; font-size: 12px; white-space: nowrap;
+        }
+        .dir-browser-path button:hover { background: #e9ecef; }
+        .dir-list {
+            border: 1px solid #eee; border-radius: 6px; max-height: 400px;
+            overflow-y: auto; background: #fafafa;
+        }
+        .dir-item {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 12px; cursor: pointer; font-size: 13px;
+            border-bottom: 1px solid #f0f0f0; transition: background .1s;
+        }
+        .dir-item:last-child { border-bottom: none; }
+        .dir-item:hover { background: #e8f4fd; }
+        .dir-item-icon { font-size: 16px; flex-shrink: 0; }
+        .dir-item-name { flex: 1; word-break: break-all; }
+        .dir-empty { padding: 24px; text-align: center; color: #999; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <header>
+        <a href="/">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 18 9 12 15 6"/>
+            </svg>
+            返回工具箱
+        </a>
+        <h1>ROS2 Bag &rarr; LeRobot v2.1 转换</h1>
+    </header>
+
+    <!-- Step Indicator -->
+    <div class="step-indicator">
+        <div class="step active" data-step="1"><span class="num">1</span>扫描</div>
+        <div class="step" data-step="2"><span class="num">2</span>Topic</div>
+        <div class="step" data-step="3"><span class="num">3</span>映射</div>
+        <div class="step" data-step="4"><span class="num">4</span>对齐</div>
+        <div class="step" data-step="5"><span class="num">5</span>转换</div>
+    </div>
+
+    <div class="main-content">
+
+        <div id="progress-panel">
+            <div class="panel-card">
+                <h3>任务进度</h3>
+                <div class="progress-track">
+                    <div id="progress-bar" style="width:0%;">0%</div>
+                </div>
+                <div id="progress-detail"></div>
+                <div class="progress-meta">
+                    <span id="progress-count">进度: 0 / 0</span>
+                    <span id="progress-elapsed">已耗时: --</span>
+                    <span id="progress-eta">预计剩余: --</span>
+                    <span id="progress-rate">速度: --</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Step 1: 扫描 ═══ -->
+        <div id="step-1" class="step-panel active">
+            <div class="panel-card">
+                <h3>Step 1: 扫描 ROS2 Bag 目录</h3>
+                <p style="font-size:13px;color:#666;margin-bottom:12px;">
+                    选择包含 ROS2 bag 文件的目录，系统将递归扫描并识别所有 bag。
+                </p>
+                <div class="input-row">
+                    <input id="r2-scan-path" type="text" placeholder="输入或选择 bag 所在目录路径...">
+                    <button class="r2-btn browse" id="btn-browse-scan" title="浏览目录">&#128193;</button>
+                    <button class="r2-btn primary" id="btn-scan">扫描</button>
+                </div>
+                <div id="bag-list"></div>
+                <div class="btn-row">
+                    <button class="r2-btn success" id="btn-step1-next" style="display:none;">下一步: 分析 Topic &rarr;</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Step 2: Topic 发现 ═══ -->
+        <div id="step-2" class="step-panel">
+            <div class="panel-card">
+                <h3>Step 2: Topic 发现</h3>
+                <div id="ros-version-info"></div>
+                <table class="r2-table">
+                    <thead>
+                        <tr><th>Topic</th><th>消息类型</th><th>频率</th><th>分类</th><th>消息数</th></tr>
+                    </thead>
+                    <tbody id="topic-list"></tbody>
+                </table>
+                <div class="btn-row">
+                    <button class="r2-btn secondary" onclick="goToStep(1)">&larr; 上一步</button>
+                    <button class="r2-btn success" id="btn-step2-next">下一步: 配置映射 &rarr;</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Step 3: 映射配置 ═══ -->
+        <div id="step-3" class="step-panel">
+            <div class="panel-card">
+                <h3>Step 3: Topic 映射配置</h3>
+
+                <h4>相机 Topic</h4>
+                <p style="font-size:12px;color:#888;margin-bottom:6px;">
+                    勾选要使用的相机，并设置 LeRobot 中的特征名称
+                </p>
+                <div id="cam-mapping"></div>
+
+                <h4>关节状态 Topic (JointState)</h4>
+                <p style="font-size:12px;color:#888;margin-bottom:6px;">
+                    每个 topic 可同时勾选 State 和 Action（数据相同但写入不同特征）
+                </p>
+                <div id="js-mapping"></div>
+
+                <h4>关节名称映射</h4>
+                <p style="font-size:12px;color:#888;margin-bottom:6px;">
+                    如果 ROS2 的 JointState 名称与 LeRobot 目标关节名不一致，可在这里按位映射。目标关节名支持逗号或换行分隔。
+                </p>
+                <textarea id="cfg-joint-targets" placeholder="例如:
+left_shoulder_pitch
+left_shoulder_roll
+left_elbow"></textarea>
+                <div class="joint-map-tools">
+                    <button class="r2-btn secondary" id="btn-auto-joint-map" type="button">自动映射名称</button>
+                    <button class="r2-btn secondary" id="btn-refresh-joint-map" type="button">刷新映射表</button>
+                </div>
+                <div id="joint-map-summary" class="joint-map-summary"></div>
+                <div id="joint-map-panel"></div>
+
+                <h4>其他 Topic</h4>
+                <div id="other-mapping"></div>
+            </div>
+
+            <div class="panel-card">
+                <h3>全局设置</h3>
+
+                <div class="cfg-row">
+                    <label>Base Topic</label>
+                    <select id="base-topic-select"></select>
+                </div>
+                <div id="base-warning"></div>
+
+                <div class="cfg-row">
+                    <label>目标 FPS</label>
+                    <input id="cfg-fps" type="number" value="30" min="1" max="120">
+                </div>
+                <div class="cfg-row">
+                    <label>重建时间戳</label>
+                    <label style="width:auto;font-weight:400;display:flex;align-items:center;gap:8px;">
+                        <input id="cfg-rebuild-ts" type="checkbox">
+                        按目标 FPS 生成统一时间轴
+                    </label>
+                </div>
+                <div class="cfg-row">
+                    <label>容差 (秒)</label>
+                    <input id="cfg-tolerance" type="number" value="0.01" step="0.001" min="0.001" max="1">
+                </div>
+                <div class="cfg-row">
+                    <label>转换线程数</label>
+                    <input id="cfg-convert-workers" type="number" value="1" min="1" max="16">
+                </div>
+                <div id="cfg-mem-estimate" class="cfg-hint"></div>
+                <div class="cfg-row">
+                    <label>任务描述</label>
+                    <input id="cfg-task" type="text" placeholder="例如: pick up the cup" style="flex:1;">
+                </div>
+                <div class="cfg-row">
+                    <label>输出目录</label>
+                    <div style="display:flex;gap:8px;flex:1;">
+                        <input id="cfg-output" type="text" placeholder="LeRobot 数据集输出路径..." style="flex:1;">
+                        <button class="r2-btn browse" id="btn-browse-output" title="浏览目录">&#128193;</button>
+                    </div>
+                </div>
+
+                <div class="btn-row">
+                    <button class="r2-btn secondary" onclick="goToStep(2)">&larr; 上一步</button>
+                    <button class="r2-btn success" id="btn-step3-next">下一步: 开始对齐 &rarr;</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ Step 4: 对齐 ═══ -->
+        <div id="step-4" class="step-panel">
+            <div class="panel-card">
+                <h3>Step 4: 时间戳对齐</h3>
+                <div id="align-status"></div>
+
+                <div class="btn-row">
+                    <button class="r2-btn secondary" onclick="goToStep(3)">&larr; 上一步</button>
+                    <button class="r2-btn primary" id="btn-start-align">开始对齐</button>
+                    <button class="r2-btn success" id="btn-step4-next" style="display:none;">下一步: 转换 &rarr;</button>
+                </div>
+
+                <div id="align-results"></div>
+            </div>
+        </div>
+
+        <!-- ═══ Step 5: 转换 ═══ -->
+        <div id="step-5" class="step-panel">
+            <div class="panel-card">
+                <h3>Step 5: 转换为 LeRobot v2.1</h3>
+                <div id="convert-status"></div>
+
+                <div class="btn-row">
+                    <button class="r2-btn secondary" onclick="goToStep(4)">&larr; 上一步</button>
+                    <button class="r2-btn primary" id="btn-start-convert">开始转换</button>
+                </div>
+
+                <div id="convert-done">
+                    转换完成! 可以在可视化工具中打开输出数据集进行验证。
+                    <br><a href="/visualize" style="color:#1565c0;">打开可视化工具</a>
+                </div>
+                <div id="convert-results"></div>
+            </div>
+        </div>
+
+    </div>
+
+    <div id="r2-toast"></div>
+
+    <script src="/static/ros2_app.js"></script>
+</body>
+</html>
