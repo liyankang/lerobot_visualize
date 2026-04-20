@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LeRobot 版本转换 - 工具箱</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f0f2f5; color: #333;
+            min-height: 100vh; display: flex; flex-direction: column;
+        }
+        header {
+            background: #1a1a2e; color: #eee;
+            padding: 12px 24px; display: flex; align-items: center; gap: 16px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3); flex-shrink: 0;
+        }
+        header a {
+            color: #aab; text-decoration: none; font-size: 13px;
+            display: flex; align-items: center; gap: 4px;
+        }
+        header a:hover { color: #fff; }
+        header h1 { font-size: 15px; font-weight: 600; }
+        header .spacer { flex: 1; }
+        header .doc-link { color: #7aa2f7; font-size: 12px; }
+        header .doc-link:hover { text-decoration: underline; }
+
+        .step-indicator {
+            display: flex; justify-content: center; gap: 0; padding: 18px 24px 0;
+            flex-shrink: 0;
+        }
+        .step-indicator .step {
+            display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+            font-size: 13px; color: #999; position: relative;
+        }
+        .step-indicator .step .num {
+            width: 26px; height: 26px; border-radius: 50%;
+            background: #ddd; color: #fff; font-size: 12px; font-weight: 700;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .step-indicator .step.active .num { background: #f5576c; }
+        .step-indicator .step.active { color: #333; font-weight: 600; }
+        .step-indicator .step.done .num { background: #27ae60; }
+        .step-indicator .step.done { color: #666; }
+        .step-indicator .step + .step::before {
+            content: ''; position: absolute; left: -16px; top: 50%;
+            width: 32px; height: 2px; background: #ddd; transform: translateY(-50%);
+        }
+        .step-indicator .step.done + .step::before,
+        .step-indicator .step.active + .step::before { background: #f5576c; }
+
+        .main-content {
+            flex: 1; max-width: 1240px; width: 100%; margin: 0 auto;
+            padding: 18px 24px; overflow-y: auto;
+        }
+        .panel-card {
+            background: #fff; border-radius: 10px; padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 16px;
+        }
+        .panel-card h3 {
+            font-size: 15px; margin-bottom: 12px; color: #333;
+            border-bottom: 1px solid #f0f0f0; padding-bottom: 8px;
+        }
+        .panel-card h4 {
+            font-size: 13px; color: #666; margin: 14px 0 8px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .step-panel { display: none; }
+        .step-panel.active { display: block; }
+
+        .input-row {
+            display: flex; gap: 8px; align-items: center; margin-bottom: 12px;
+        }
+        .input-row label { width: 120px; font-size: 13px; color: #555; flex-shrink: 0; }
+        .input-row input[type="text"], .input-row input[type="number"], .input-row select {
+            flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 13px;
+        }
+        .input-row input:focus, .input-row select:focus { outline: none; border-color: #f5576c; }
+
+        .btn {
+            padding: 8px 18px; border: none; border-radius: 6px; font-size: 13px;
+            font-weight: 600; cursor: pointer; transition: all .15s;
+        }
+        .btn.primary { background: #f5576c; color: #fff; }
+        .btn.primary:hover { background: #dd4055; }
+        .btn.primary:disabled { background: #f4b0b9; cursor: not-allowed; }
+        .btn.secondary { background: #e9ecef; color: #555; }
+        .btn.secondary:hover { background: #dee2e6; }
+        .btn.success { background: #27ae60; color: #fff; }
+        .btn.ghost { background: transparent; color: #666; border: 1px solid #ddd; }
+        .btn.small { padding: 4px 10px; font-size: 12px; }
+
+        .btn-row { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
+
+        .summary-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 8px 16px; font-size: 13px;
+        }
+        .summary-grid .kv { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed #eee; }
+        .summary-grid .kv span:first-child { color: #888; }
+        .summary-grid .kv span:last-child { color: #333; font-weight: 600; }
+
+        .ver-badge {
+            display: inline-block; padding: 3px 10px; border-radius: 10px;
+            background: #f5576c; color: #fff; font-size: 12px; font-weight: 700;
+            margin-right: 8px;
+        }
+        .ver-badge.v20 { background: #7b1fa2; }
+        .ver-badge.v21 { background: #1976d2; }
+        .ver-badge.v30 { background: #2e7d32; }
+
+        .tag {
+            display: inline-block; padding: 2px 8px; border-radius: 8px;
+            background: #f8f9fa; color: #555; font-size: 11px; margin: 2px 4px 2px 0;
+        }
+
+        /* progress */
+        .progress-track {
+            width: 100%; height: 22px; background: #e9ecef; border-radius: 11px; overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%; background: linear-gradient(90deg, #f093fb, #f5576c);
+            color: #fff; font-size: 11px; font-weight: 700;
+            display: flex; align-items: center; justify-content: center;
+            transition: width .3s;
+            min-width: 0;
+        }
+        .progress-meta {
+            display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px;
+            font-size: 12px; color: #666;
+        }
+        .progress-meta span { background: #f8f9fa; border-radius: 999px; padding: 3px 10px; }
+
+        .notice { padding: 10px 12px; border-radius: 8px; font-size: 12px; margin: 8px 0; }
+        .notice.info { background: #e3f2fd; color: #0d47a1; }
+        .notice.warn { background: #fff3e0; color: #bf360c; }
+        .notice.error { background: #ffebee; color: #b71c1c; }
+        .notice.ok { background: #e8f5e9; color: #1b5e20; }
+
+        /* compare view */
+        .compare-wrap {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+        }
+        .compare-col h4 {
+            margin: 0 0 6px; color: #555; font-size: 12px; text-transform: uppercase;
+        }
+        .compare-col .path-input {
+            display: flex; gap: 6px; margin-bottom: 8px;
+        }
+        .compare-col .path-input input {
+            flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 12px; font-family: monospace;
+        }
+        .compare-col .meta-summary { font-size: 12px; color: #666; margin-bottom: 6px; }
+        .compare-col .meta-summary span { background: #f8f9fa; border-radius: 6px; padding: 2px 8px; margin-right: 6px; }
+        .tree-toolbar {
+            display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+            flex-wrap: wrap;
+        }
+        .tree-toolbar button {
+            background: #f1f3f4; border: 1px solid #e0e0e0; border-radius: 6px;
+            padding: 3px 8px; font-size: 11px; cursor: pointer; color: #333;
+        }
+        .tree-toolbar button:hover { background: #e8eaed; }
+        .tree-toolbar button.active { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+        .tree-toolbar .file-quick {
+            flex: 1; min-width: 120px;
+            padding: 3px 8px; font-size: 11px; font-family: monospace;
+            border: 1px solid #e0e0e0; border-radius: 6px;
+        }
+        .tree {
+            border: 1px solid #e5e7eb; border-radius: 8px; padding: 6px;
+            height: 340px; overflow: auto; font-family: monospace; font-size: 12px;
+            background: #fafbfc;
+        }
+        .tree ul { list-style: none; padding-left: 18px; margin: 0; }
+        .tree > ul { padding-left: 2px; }
+        .tree li { padding: 0; user-select: none; }
+        .tree .row {
+            display: flex; align-items: center; gap: 4px;
+            padding: 2px 4px; border-radius: 4px; cursor: pointer;
+            line-height: 1.4;
+        }
+        .tree .row:hover { background: #eef3fb; }
+        .tree .caret {
+            display: inline-block; width: 12px; text-align: center;
+            color: #888; font-size: 10px; transition: transform 0.1s;
+            flex-shrink: 0;
+        }
+        .tree li.dir > .row > .caret::before { content: "▸"; }
+        .tree li.dir.open > .row > .caret::before { content: "▾"; }
+        .tree li.file > .row > .caret { visibility: hidden; }
+        .tree .icon { flex-shrink: 0; font-size: 11px; }
+        .tree .name { flex: 0 1 auto; word-break: break-all; }
+        .tree li.dir > .row > .name { color: #1a73e8; font-weight: 600; }
+        .tree li.file > .row > .name { color: #444; }
+        .tree li.file.selected > .row { background: #ffe8ec; box-shadow: inset 0 0 0 1px #e53935; }
+        .tree li.file.mirror > .row { background: #fff3e0; }
+        .tree .sz { color: #999; font-size: 10px; margin-left: auto; padding-left: 8px; flex-shrink: 0; }
+        .tree li.only-left > .row { background: #ffecec; }
+        .tree li.only-right > .row { background: #e6f7ea; }
+        .tree li.common-diff > .row > .icon::after { content: " ≠"; color: #e65100; }
+        .tree.only-diff li.common:not(.common-diff) { display: none; }
+
+        .preview-panel {
+            margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+        }
+        .preview-box {
+            background: #0f1420; color: #d6deeb; border-radius: 8px; padding: 12px;
+            height: 380px; overflow: auto;
+            font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px;
+            white-space: pre-wrap; word-break: break-all;
+        }
+        .preview-box .hd {
+            color: #82aaff; margin-bottom: 6px; font-size: 11px;
+            border-bottom: 1px solid #1f2937; padding-bottom: 4px;
+        }
+        .preview-box table {
+            width: 100%; border-collapse: collapse; font-size: 11px; color: #d6deeb;
+            margin-top: 6px;
+        }
+        .preview-box table th, .preview-box table td {
+            border: 1px solid #1f2937; padding: 3px 6px; text-align: left; vertical-align: top;
+        }
+        .preview-box table th { color: #ffcb6b; background: #121926; }
+
+        /* directory picker modal */
+        .modal-backdrop {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.4); z-index: 1000;
+            align-items: center; justify-content: center;
+        }
+        .modal-backdrop.active { display: flex; }
+        .modal {
+            background: #fff; border-radius: 10px; padding: 20px;
+            width: min(560px, 90vw); max-height: 80vh; display: flex; flex-direction: column;
+        }
+        .modal h3 { font-size: 15px; margin-bottom: 10px; }
+        .modal .current { font-family: monospace; font-size: 12px; color: #555; margin-bottom: 6px; word-break: break-all; }
+        .modal .dir-list {
+            flex: 1; overflow: auto; border: 1px solid #eee; border-radius: 6px;
+            font-size: 13px;
+        }
+        .modal .dir-item {
+            padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #f5f5f5;
+        }
+        .modal .dir-item:hover { background: #f8f9fa; }
+        .modal .dir-item.parent { color: #1a73e8; }
+        .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+        .modal input[type="text"] {
+            width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 12px; font-family: monospace;
+        }
+
+        footer { text-align: center; padding: 12px; font-size: 12px; color: #999; }
+    </style>
+</head>
+<body>
+<header>
+    <a href="/">← 返回门户</a>
+    <h1>LeRobot 版本转换</h1>
+    <div class="spacer"></div>
+    <a href="/docs/lerobot_format_conversion.md" class="doc-link" id="link-doc">查看格式文档</a>
+</header>
+
+<div class="step-indicator">
+    <div class="step active" data-step="1"><div class="num">1</div>选择源数据集</div>
+    <div class="step" data-step="2"><div class="num">2</div>目标版本 &amp; 输出</div>
+    <div class="step" data-step="3"><div class="num">3</div>执行转换</div>
+    <div class="step" data-step="4"><div class="num">4</div>数据对比</div>
+</div>
+
+<div class="main-content">
+
+<!-- Step 1: source -->
+<div class="step-panel active" data-step="1">
+    <div class="panel-card">
+        <h3>1. 选择 LeRobot 数据集</h3>
+        <div class="input-row">
+            <label>数据集路径</label>
+            <input type="text" id="src-path" placeholder="/abs/path/to/lerobot_dataset">
+            <button class="btn ghost small" id="src-browse">浏览…</button>
+            <button class="btn primary" id="src-scan">扫描</button>
+        </div>
+        <div class="notice info" id="src-hint">
+            指向某个 LeRobot 数据集根目录（内部必须存在 <code>meta/info.json</code>）。支持 v2.0 / v2.1 / v3.0。
+        </div>
+        <div id="src-summary" style="display:none"></div>
+    </div>
+</div>
+
+<!-- Step 2: target -->
+<div class="step-panel" data-step="2">
+    <div class="panel-card">
+        <h3>2. 选择目标版本与输出目录</h3>
+        <div class="input-row">
+            <label>目标版本</label>
+            <select id="target-version"></select>
+        </div>
+        <div id="target-hint" class="notice info"></div>
+        <div class="input-row">
+            <label>输出目录</label>
+            <input type="text" id="out-path" placeholder="/abs/path/to/output_dataset_converted">
+            <button class="btn ghost small" id="out-browse">浏览…</button>
+        </div>
+        <div id="v3-options" style="display:none">
+            <h4>v3.0 合并参数（可选）</h4>
+            <div class="input-row">
+                <label>parquet 目标大小</label>
+                <input type="number" id="opt-data-mb" value="100" min="10">
+                <span style="font-size:12px;color:#888">MB / 合并文件</span>
+            </div>
+            <div class="input-row">
+                <label>video 目标大小</label>
+                <input type="number" id="opt-video-mb" value="500" min="50">
+                <span style="font-size:12px;color:#888">MB / 合并 mp4</span>
+            </div>
+        </div>
+
+        <div id="stats-options" style="margin-top:14px;padding:10px;background:#fafbfc;border:1px solid #e5e7eb;border-radius:8px">
+            <h4 style="margin:0 0 6px">stats.json 计算方式</h4>
+            <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:6px">
+                <input type="radio" name="stats-mode" id="stats-mode-agg" value="agg" checked>
+                <div>
+                    <b>聚合 episodes_stats.jsonl（快）</b>
+                    <div style="color:#666;font-size:12px">直接读源里已经算好的每个 episode 的 stats, 用加权平均合并。秒级完成, 但结果准确性取决于源数据是否真实。</div>
+                </div>
+            </label>
+            <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px">
+                <input type="radio" name="stats-mode" id="stats-mode-raw" value="raw">
+                <div>
+                    <b>从原始 parquet / 视频重新计算（慢, 可验证）</b>
+                    <div style="color:#666;font-size:12px">
+                        扫描 <code>data/*.parquet</code> 的数值列, 并通过 ffmpeg 解码 <code>videos/*.mp4</code> 的每一帧, 重新算 mean/std/min/max/count。每个数值都能追溯到原始帧, 和源里的 <code>episodes_stats.jsonl</code> 无关。
+                    </div>
+                </div>
+            </label>
+            <div id="stats-raw-opts" style="display:none;margin-top:10px;padding-left:26px">
+                <div class="input-row">
+                    <label>视频抽帧步长</label>
+                    <input type="number" id="opt-video-stride" value="1" min="1" max="60" style="width:80px">
+                    <span style="font-size:12px;color:#888">1 = 全部解码最准；5 表示每 5 帧取 1 帧（大约快 5×，误差 &lt; 1% 通常可接受）</span>
+                </div>
+                <label style="font-size:12px;display:flex;align-items:center;gap:6px;color:#333">
+                    <input type="checkbox" id="opt-include-video-stats" checked>
+                    包含视频 stats（取消勾选则只重算 parquet 中的数值列，跳过所有 mp4 解码）
+                </label>
+            </div>
+        </div>
+
+        <div class="btn-row">
+            <button class="btn secondary" data-goto="1">上一步</button>
+            <button class="btn primary" id="go-convert">开始转换</button>
+        </div>
+    </div>
+</div>
+
+<!-- Step 3: progress -->
+<div class="step-panel" data-step="3">
+    <div class="panel-card">
+        <h3>3. 转换进度</h3>
+        <div id="convert-status" class="notice info">正在等待启动…</div>
+        <div class="progress-track"><div class="progress-bar" id="progress-bar" style="width:0%">0%</div></div>
+        <div id="progress-detail" style="font-size:12px;color:#666;margin-top:8px"></div>
+        <div class="progress-meta" id="progress-meta"></div>
+
+        <div class="btn-row">
+            <button class="btn secondary" data-goto="2" id="back-to-step2" style="display:none">返回上一步</button>
+            <button class="btn success" id="go-compare" style="display:none">进入数据对比 →</button>
+        </div>
+    </div>
+</div>
+
+<!-- Step 4: compare -->
+<div class="step-panel" data-step="4">
+    <div class="panel-card">
+        <h3>4. 数据比对查看</h3>
+        <div class="notice info">
+            左右两侧可任意指定目录进行对比（默认为本次转换的源与输出）。点击树中任意行选择；
+            启用 <b>同步选中</b> 后，点击一侧文件会自动在另一侧预览同名文件。也可直接在 <b>文件路径</b> 输入框粘贴任意文件进行预览。
+        </div>
+
+        <div class="btn-row" style="margin-bottom:8px;gap:12px;flex-wrap:wrap">
+            <label style="font-size:12px;color:#333;display:flex;align-items:center;gap:6px">
+                <input type="checkbox" id="cmp-sync-select" checked> 同步选中（联动预览同路径文件）
+            </label>
+            <label style="font-size:12px;color:#333;display:flex;align-items:center;gap:6px">
+                <input type="checkbox" id="cmp-sync-scroll"> 同步滚动
+            </label>
+        </div>
+
+        <div class="compare-wrap">
+            <div class="compare-col">
+                <h4>左侧 · 原始</h4>
+                <div class="path-input">
+                    <input type="text" id="cmp-left" placeholder="/path/to/left">
+                    <button class="btn ghost small" data-cmp-browse="left">浏览…</button>
+                </div>
+                <div class="meta-summary" id="cmp-left-meta"></div>
+                <div class="tree-toolbar">
+                    <button data-tool="expand" data-side="left">全部展开</button>
+                    <button data-tool="collapse" data-side="left">全部收起</button>
+                    <button data-tool="only-diff" data-side="left">只看差异</button>
+                    <input class="file-quick" id="cmp-left-file" placeholder="直接粘贴左侧文件路径… (回车预览)">
+                </div>
+                <div class="tree" id="tree-left"></div>
+            </div>
+            <div class="compare-col">
+                <h4>右侧 · 目标</h4>
+                <div class="path-input">
+                    <input type="text" id="cmp-right" placeholder="/path/to/right">
+                    <button class="btn ghost small" data-cmp-browse="right">浏览…</button>
+                </div>
+                <div class="meta-summary" id="cmp-right-meta"></div>
+                <div class="tree-toolbar">
+                    <button data-tool="expand" data-side="right">全部展开</button>
+                    <button data-tool="collapse" data-side="right">全部收起</button>
+                    <button data-tool="only-diff" data-side="right">只看差异</button>
+                    <input class="file-quick" id="cmp-right-file" placeholder="直接粘贴右侧文件路径… (回车预览)">
+                </div>
+                <div class="tree" id="tree-right"></div>
+            </div>
+        </div>
+        <div class="btn-row" style="justify-content:space-between">
+            <div id="diff-summary" style="font-size:12px;color:#666"></div>
+            <div>
+                <button class="btn secondary" data-goto="3">← 返回</button>
+                <button class="btn primary" id="cmp-refresh">刷新对比</button>
+            </div>
+        </div>
+
+        <!-- stats 校验面板 -->
+        <div style="margin-top:18px;padding:12px;background:#fafbfc;border:1px solid #e5e7eb;border-radius:8px">
+            <h4 style="margin:0 0 6px">🔬 stats 准确性校验</h4>
+            <div style="font-size:12px;color:#666;margin-bottom:8px">
+                对任一 v2.1 数据集, 从原始 parquet / 视频重新计算 stats, 并与数据集里已有的
+                <code>meta/stats.json</code> 以及对 <code>episodes_stats.jsonl</code> 做聚合的结果做逐 feature / 逐 metric 对比。
+            </div>
+            <div class="input-row" style="margin-bottom:6px">
+                <label style="min-width:70px;font-size:12px">数据集</label>
+                <input type="text" id="verify-path" placeholder="/path/to/v21_dataset" style="flex:1;padding:6px 10px;border:1px solid #ddd;border-radius:6px;font-family:monospace;font-size:12px">
+                <button class="btn ghost small" data-cmp-browse="verify">浏览…</button>
+            </div>
+            <div class="input-row" style="margin-bottom:6px;gap:12px;flex-wrap:wrap">
+                <label style="font-size:12px;min-width:70px">抽帧步长</label>
+                <input type="number" id="verify-stride" value="5" min="1" max="60" style="width:80px;padding:6px 10px;border:1px solid #ddd;border-radius:6px">
+                <label style="font-size:12px;display:flex;align-items:center;gap:6px">
+                    <input type="checkbox" id="verify-include-video" checked> 包含视频
+                </label>
+                <label style="font-size:12px;display:flex;align-items:center;gap:6px">
+                    容忍阈值
+                    <input type="number" id="verify-tol" value="0.0001" step="0.0001" style="width:100px;padding:6px 10px;border:1px solid #ddd;border-radius:6px">
+                </label>
+                <button class="btn primary small" id="verify-run">开始校验</button>
+            </div>
+            <div id="verify-status" style="font-size:12px;color:#666;margin-top:6px"></div>
+            <div id="verify-result" style="margin-top:8px"></div>
+        </div>
+
+        <div class="preview-panel">
+            <div class="preview-box" id="preview-left"><div class="hd">左侧预览</div><div class="bd">点击左侧文件查看内容</div></div>
+            <div class="preview-box" id="preview-right"><div class="hd">右侧预览</div><div class="bd">点击右侧文件查看内容</div></div>
+        </div>
+    </div>
+</div>
+
+</div>
+
+<!-- browse modal -->
+<div class="modal-backdrop" id="browse-modal">
+    <div class="modal">
+        <h3 id="browse-title">选择目录</h3>
+        <div class="current" id="browse-current">/</div>
+        <div class="input-row">
+            <input type="text" id="browse-input" placeholder="输入路径后按回车可直接跳转">
+        </div>
+        <div class="dir-list" id="browse-list"></div>
+        <div class="actions">
+            <button class="btn ghost" id="browse-cancel">取消</button>
+            <button class="btn primary" id="browse-ok">选择此目录</button>
+        </div>
+    </div>
+</div>
+
+<footer>LeRobot Toolbox · 版本转换</footer>
+
+<script src="/static/converter.js"></script>
+</body>
+</html>

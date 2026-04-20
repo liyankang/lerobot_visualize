@@ -47,6 +47,8 @@
         .card .icon-vis { background: linear-gradient(135deg, #667eea, #764ba2); }
         .card .icon-ros { background: linear-gradient(135deg, #f093fb, #f5576c); }
         .card .icon-analysis { background: linear-gradient(135deg, #36d1dc, #2563eb); }
+        .card .icon-convert { background: linear-gradient(135deg, #fa709a, #fee140); }
+        .card .icon-verify { background: linear-gradient(135deg, #11998e, #38ef7d); }
 
         .card h2 { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
         .card p { font-size: 13px; color: #666; line-height: 1.6; }
@@ -93,7 +95,7 @@
             </div>
             <h2>ROS2 数据转换</h2>
             <p>将 ROS2 bag 数据转换为 LeRobot v2.1 格式数据集，支持话题映射与时间戳对齐。</p>
-            <span class="badge badge-wip">开发中</span>
+            <span class="badge badge-ready">可用</span>
         </a>
 
         <a class="card" href="/data-analysis">
@@ -109,6 +111,33 @@
             </div>
             <h2>LeRobot 数据分析</h2>
             <p>从 VLA 视角分析关节分布、时序平滑性、物理约束、多模态对齐、任务结构与可学习性。</p>
+            <span class="badge badge-ready">可用</span>
+        </a>
+
+        <a class="card" href="/converter">
+            <div class="icon icon-convert">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="17 1 21 5 17 9"/>
+                    <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+                    <polyline points="7 23 3 19 7 15"/>
+                    <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+                </svg>
+            </div>
+            <h2>LeRobot 版本转换</h2>
+            <p>在 LeRobot 数据集 v2.0 / v2.1 / v3.0 之间互转：v2.1 ⇄ v3.0、v2.1 → v2.0。转换过程全程进度可视化，结束后支持左右目录对比。</p>
+            <span class="badge badge-ready">可用</span>
+        </a>
+
+        <a class="card" href="/verify-stats">
+            <div class="icon icon-verify">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 12l2 2 4-4"/>
+                    <path d="M12 2a10 10 0 1 0 10 10"/>
+                    <path d="M22 4L12 14.01l-3-3"/>
+                </svg>
+            </div>
+            <h2>Stats 准确性校验</h2>
+            <p>从原始 <code>parquet</code> + <code>mp4</code> 重新计算 per-feature 的 mean/std/min/max，与数据集自带的 <code>meta/stats.json</code> 以及聚合 <code>episodes_stats.jsonl</code> 的结果逐项交叉比对。</p>
             <span class="badge badge-ready">可用</span>
         </a>
     </div>

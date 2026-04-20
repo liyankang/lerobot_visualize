@@ -1788,6 +1788,218 @@ class DatasetEditor:
 
         return params
 
+    @staticmethod
+    def _probe_video_stream(src_path):
+        """轻量探测视频真实 fps / 帧数 / 时长, 用于一致性检查。
+
+        失败时返回 None; 缺失字段为 None。尽量只用 format+stream 头, 不做
+        -count_frames 防止慢; 若 nb_frames 缺失则用 duration * fps 兜底。
+        """
+        try:
+            r = subprocess.run([
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", "-select_streams", "v:0",
+                "-show_format",
+                str(src_path),
+            ], capture_output=True, timeout=30)
+            if r.returncode != 0:
+                return None
+            payload = json.loads(r.stdout)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return None
+
+        streams = payload.get("streams") or []
+        if not streams:
+            return None
+        s = streams[0]
+        fmt = payload.get("format") or {}
+
+        def _parse_fraction(v):
+            if not v:
+                return None
+            try:
+                if "/" in str(v):
+                    num, den = str(v).split("/", 1)
+                    num_f, den_f = float(num), float(den)
+                    if den_f <= 0:
+                        return None
+                    return num_f / den_f
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        fps = _parse_fraction(s.get("avg_frame_rate")) or _parse_fraction(s.get("r_frame_rate"))
+        duration = None
+        for candidate in (s.get("duration"), fmt.get("duration")):
+            try:
+                if candidate is not None:
+                    duration = float(candidate)
+                    break
+            except (TypeError, ValueError):
+                continue
+
+        nb_frames = None
+        for candidate in (s.get("nb_frames"), s.get("nb_read_frames")):
+            try:
+                if candidate is not None:
+                    nb_frames = int(candidate)
+                    break
+            except (TypeError, ValueError):
+                continue
+        if nb_frames is None and fps and duration:
+            nb_frames = int(round(fps * duration))
+
+        return {
+            "fps": fps,
+            "nb_frames": nb_frames,
+            "duration": duration,
+            "codec": s.get("codec_name"),
+        }
+
+    def check_integrity(self, max_workers=8, fps_rel_tol=0.01, frame_count_tol=0):
+        """比对每集每路视频与 parquet 的一致性, 返回结构化报告。
+
+        检查项:
+          - video_fps vs info.json fps (相对误差 > fps_rel_tol 判 error)
+          - video_nb_frames vs parquet 行数 (超过 frame_count_tol 判 error)
+          - video_duration vs parquet_rows/info_fps (差 > 2 帧 判 error)
+        """
+        info_fps = float(self.info.get("fps", 30) or 30)
+        if info_fps <= 0:
+            info_fps = 30.0
+        frame_tol_sec = 2.0 / info_fps
+
+        jobs = []
+        for cur_idx, df in self.episode_data.items():
+            orig_idx = self._orig_indices.get(cur_idx, cur_idx)
+            vfiles = self._orig_video_files.get(orig_idx, {})
+            parquet_rows = int(len(df))
+            for cam_name, vpath in vfiles.items():
+                jobs.append((cur_idx, cam_name, vpath, parquet_rows))
+
+        probed_map = {}
+        if jobs:
+            unique_paths = {job[2] for job in jobs}
+            worker_count = max(1, min(max_workers, len(unique_paths)))
+            with ThreadPoolExecutor(max_workers=worker_count) as ex:
+                future_to_path = {
+                    ex.submit(self._probe_video_stream, p): p
+                    for p in unique_paths
+                }
+                for fut in as_completed(future_to_path):
+                    path = future_to_path[fut]
+                    try:
+                        probed_map[path] = fut.result()
+                    except Exception:
+                        probed_map[path] = None
+
+        ffprobe_missing = bool(jobs) and all(probed_map.get(p) is None for p in {j[2] for j in jobs})
+
+        episodes_report = {}
+        error_count = 0
+        warning_count = 0
+        affected_episodes = set()
+
+        for cur_idx, cam_name, vpath, parquet_rows in jobs:
+            probed = probed_map.get(vpath)
+            entry = {
+                "camera": cam_name,
+                "video_path": os.path.basename(vpath),
+                "parquet_rows": parquet_rows,
+                "video_fps": None,
+                "video_nb_frames": None,
+                "video_duration": None,
+                "issues": [],
+            }
+            level = None
+
+            if probed is None:
+                entry["issues"].append({
+                    "level": "warning",
+                    "code": "probe_failed",
+                    "message": "ffprobe 探测失败 (文件缺失或 ffprobe 未安装)",
+                })
+                level = "warning"
+            else:
+                vfps = probed.get("fps")
+                vframes = probed.get("nb_frames")
+                vdur = probed.get("duration")
+                entry["video_fps"] = vfps
+                entry["video_nb_frames"] = vframes
+                entry["video_duration"] = vdur
+
+                if vfps is not None and info_fps > 0:
+                    rel_err = abs(vfps - info_fps) / info_fps
+                    if rel_err > fps_rel_tol:
+                        entry["issues"].append({
+                            "level": "error",
+                            "code": "fps_mismatch",
+                            "message": (
+                                f"视频真实 fps {vfps:.3f} 与 info.json {info_fps:g} "
+                                f"不符 (相对误差 {rel_err*100:.2f}%)"
+                            ),
+                        })
+                        level = "error"
+
+                if vframes is not None:
+                    diff = vframes - parquet_rows
+                    if abs(diff) > frame_count_tol:
+                        entry["issues"].append({
+                            "level": "error",
+                            "code": "frame_count_mismatch",
+                            "message": (
+                                f"视频帧数 {vframes} 与 parquet 行数 {parquet_rows} "
+                                f"不符 (差 {diff:+d})"
+                            ),
+                        })
+                        level = "error"
+
+                if vdur is not None and parquet_rows > 0:
+                    expected = parquet_rows / info_fps
+                    if abs(vdur - expected) > frame_tol_sec:
+                        entry["issues"].append({
+                            "level": "error",
+                            "code": "duration_mismatch",
+                            "message": (
+                                f"视频时长 {vdur:.3f}s 与 parquet 推算 "
+                                f"{expected:.3f}s 不符 (差 {vdur-expected:+.3f}s)"
+                            ),
+                        })
+                        level = "error"
+
+            if level == "error":
+                error_count += 1
+                affected_episodes.add(cur_idx)
+            elif level == "warning":
+                warning_count += 1
+
+            ep_bucket = episodes_report.setdefault(cur_idx, {
+                "episode_index": int(cur_idx),
+                "cameras": [],
+                "max_level": None,
+            })
+            ep_bucket["cameras"].append(entry)
+            if level == "error":
+                ep_bucket["max_level"] = "error"
+            elif level == "warning" and ep_bucket["max_level"] != "error":
+                ep_bucket["max_level"] = "warning"
+
+        episodes_list = sorted(episodes_report.values(), key=lambda x: x["episode_index"])
+        only_bad = [ep for ep in episodes_list if ep["max_level"] in ("error", "warning")]
+
+        return {
+            "info_fps": info_fps,
+            "total_episodes_checked": len(episodes_list),
+            "total_videos_checked": len(jobs),
+            "affected_episodes": sorted(int(i) for i in affected_episodes),
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "ffprobe_missing": ffprobe_missing,
+            "episodes": only_bad,
+        }
+
     def _reencode_video(self, src_path, keep_frame_indices, dst_path,
                         cached_params=None):
         """用 ffmpeg select 滤镜重编码视频, 仅保留指定帧, 匹配源编码格式。
@@ -2972,6 +3184,30 @@ def data_analysis():
     return render_template("analysis.html")
 
 
+@app.route("/converter")
+def converter_page():
+    return render_template("converter.html")
+
+
+@app.route("/verify-stats")
+def verify_stats_page():
+    return render_template("verify_stats.html")
+
+
+@app.route("/docs/<path:doc_name>")
+def serve_doc(doc_name):
+    docs_dir = (Path(__file__).parent / "docs").resolve()
+    target = (docs_dir / doc_name).resolve()
+    try:
+        target.relative_to(docs_dir)
+    except ValueError:
+        abort(403)
+    if not target.exists() or not target.is_file():
+        abort(404)
+    mime = "text/markdown; charset=utf-8" if target.suffix.lower() == ".md" else "text/plain; charset=utf-8"
+    return send_file(str(target), mimetype=mime)
+
+
 @app.route("/api/browse")
 def api_browse():
     """浏览服务端目录结构，返回子目录列表。跨平台支持。"""
@@ -3091,6 +3327,18 @@ def api_episodes():
     if _editor is None:
         return jsonify({"error": "未加载数据集"}), 400
     return jsonify({"episodes": _editor.get_episodes(), "summary": _editor.get_summary()})
+
+
+@app.route("/api/integrity")
+def api_integrity():
+    if _editor is None:
+        return jsonify({"error": "未加载数据集"}), 400
+    try:
+        report = _editor.check_integrity()
+        return jsonify({"success": True, **report})
+    except Exception as e:
+        log.exception("一致性检查失败")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/episode/<int:ep_idx>")
@@ -3688,6 +3936,577 @@ def api_ros2_resume():
         "scan": saved_scan,
         "topics": saved_topics,
     })
+
+
+# ═══════════════════════ LeRobot 版本转换 API ═══════════════════════
+
+import lerobot_converter as lconv
+
+_convert_progress_lock = threading.Lock()
+_convert_progress: dict = {
+    "running": False,
+    "stage": "",
+    "title": "",
+    "detail": "",
+    "current": 0,
+    "total": 0,
+    "percent": 0,
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+    "result": None,
+    "source": "",
+    "target": "",
+    "target_version": "",
+}
+
+
+def _set_convert_progress(**kwargs):
+    with _convert_progress_lock:
+        _convert_progress.update(kwargs)
+
+
+def _get_convert_progress():
+    with _convert_progress_lock:
+        data = dict(_convert_progress)
+    started_at = data.get("started_at")
+    finished_at = data.get("finished_at")
+    now = time.time()
+    total = max(0, int(data.get("total", 0) or 0))
+    current = max(0, int(data.get("current", 0) or 0))
+    if total > 0:
+        data["percent"] = max(0, min(100, round(current * 100 / total)))
+    if started_at:
+        end = finished_at or now
+        data["elapsed_sec"] = max(0.0, end - started_at)
+        if current > 0 and data["elapsed_sec"] > 0 and total > current:
+            rate = current / data["elapsed_sec"]
+            data["eta_sec"] = (total - current) / rate if rate > 0 else None
+        else:
+            data["eta_sec"] = 0 if (total > 0 and current >= total) else None
+    else:
+        data["elapsed_sec"] = None
+        data["eta_sec"] = None
+    return data
+
+
+def _convert_progress_cb(payload: dict) -> None:
+    """由转换核心模块回调: {stage, title, detail, current, total}."""
+    with _convert_progress_lock:
+        if payload.get("stage"):
+            _convert_progress["stage"] = payload["stage"]
+        if payload.get("title"):
+            _convert_progress["title"] = payload["title"]
+        if "detail" in payload:
+            _convert_progress["detail"] = payload["detail"] or ""
+        if "current" in payload:
+            _convert_progress["current"] = int(payload["current"])
+        if "total" in payload:
+            _convert_progress["total"] = int(payload["total"])
+
+
+# ───────── stats 校验 (独立门户) 的进度跟踪 ─────────
+
+_verify_progress_lock = threading.Lock()
+_verify_progress: dict = {
+    "running": False,
+    "stage": "",
+    "title": "",
+    "detail": "",
+    "current": 0,
+    "total": 0,
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+    "result": None,
+    "path": "",
+}
+
+
+def _set_verify_progress(**kwargs):
+    with _verify_progress_lock:
+        _verify_progress.update(kwargs)
+
+
+def _verify_progress_cb(payload: dict) -> None:
+    with _verify_progress_lock:
+        if payload.get("stage"):
+            _verify_progress["stage"] = payload["stage"]
+        if payload.get("title"):
+            _verify_progress["title"] = payload["title"]
+        if "detail" in payload:
+            _verify_progress["detail"] = payload["detail"] or ""
+        if "current" in payload:
+            _verify_progress["current"] = int(payload["current"])
+        if "total" in payload:
+            _verify_progress["total"] = int(payload["total"])
+
+
+def _get_verify_progress():
+    with _verify_progress_lock:
+        data = dict(_verify_progress)
+    started_at = data.get("started_at")
+    finished_at = data.get("finished_at")
+    now = time.time()
+    total = max(0, int(data.get("total", 0) or 0))
+    current = max(0, int(data.get("current", 0) or 0))
+    data["percent"] = max(0, min(100, round(current * 100 / total))) if total > 0 else 0
+    if started_at:
+        end = finished_at or now
+        data["elapsed_sec"] = max(0.0, end - started_at)
+        if current > 0 and data["elapsed_sec"] > 0 and total > current:
+            rate = current / data["elapsed_sec"]
+            data["eta_sec"] = (total - current) / rate if rate > 0 else None
+        else:
+            data["eta_sec"] = 0 if (total > 0 and current >= total) else None
+    else:
+        data["elapsed_sec"] = None
+        data["eta_sec"] = None
+    return data
+
+
+@app.route("/api/convert/inspect", methods=["POST"])
+def api_convert_inspect():
+    data = request.get_json() or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "请输入数据集路径"}), 400
+    try:
+        info = lconv.inspect_dataset(path)
+        return jsonify({"success": True, "info": info})
+    except Exception as e:  # pylint: disable=broad-except
+        log.exception("扫描数据集失败")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/convert/start", methods=["POST"])
+def api_convert_start():
+    data = request.get_json() or {}
+    src = (data.get("source") or "").strip()
+    dst = (data.get("target") or "").strip()
+    target_version = (data.get("target_version") or "").strip()
+    data_mb = int(data.get("data_file_size_mb") or lconv.DEFAULT_DATA_FILE_SIZE_MB)
+    video_mb = int(data.get("video_file_size_mb") or lconv.DEFAULT_VIDEO_FILE_SIZE_MB)
+    recompute_stats = bool(data.get("recompute_stats", False))
+    video_stride = max(1, int(data.get("video_stride") or 1))
+    include_video_stats = bool(data.get("include_video_stats", True))
+
+    if not src or not dst or not target_version:
+        return jsonify({"error": "source / target / target_version 均不能为空"}), 400
+
+    src_path = Path(src).expanduser().resolve()
+    dst_path = Path(dst).expanduser().resolve()
+    if not src_path.exists():
+        return jsonify({"error": f"源路径不存在: {src_path}"}), 400
+    if src_path == dst_path:
+        return jsonify({"error": "目标目录不能与源目录相同"}), 400
+    try:
+        dst_path.relative_to(src_path)
+        return jsonify({"error": "目标目录不能位于源目录内部"}), 400
+    except ValueError:
+        pass
+
+    with _convert_progress_lock:
+        if _convert_progress.get("running"):
+            return jsonify({"error": "已有转换任务在进行中，请稍后再试"}), 400
+        _convert_progress.clear()
+        _convert_progress.update({
+            "running": True,
+            "stage": "init",
+            "title": "初始化",
+            "detail": "",
+            "current": 0,
+            "total": 1,
+            "percent": 0,
+            "started_at": time.time(),
+            "finished_at": None,
+            "error": None,
+            "result": None,
+            "source": str(src_path),
+            "target": str(dst_path),
+            "target_version": target_version,
+        })
+
+    try:
+        src_version = lconv.detect_codebase_version(src_path)
+    except Exception as e:  # pylint: disable=broad-except
+        _set_convert_progress(running=False, finished_at=time.time(), error=str(e))
+        return jsonify({"error": str(e)}), 400
+
+    direction = (src_version, target_version)
+    supported = {
+        (lconv.V21, lconv.V30),
+        (lconv.V30, lconv.V21),
+        (lconv.V21, lconv.V20),
+    }
+    if direction not in supported:
+        msg = f"不支持的转换方向: {src_version} → {target_version}"
+        _set_convert_progress(running=False, finished_at=time.time(), error=msg)
+        return jsonify({"error": msg}), 400
+
+    def worker():
+        try:
+            if direction == (lconv.V21, lconv.V30):
+                result = lconv.convert_v21_to_v30(
+                    src_path, dst_path, _convert_progress_cb,
+                    data_file_size_mb=data_mb,
+                    video_file_size_mb=video_mb,
+                    recompute_stats=recompute_stats,
+                    video_stride=video_stride,
+                    include_video_stats=include_video_stats,
+                )
+            elif direction == (lconv.V30, lconv.V21):
+                result = lconv.convert_v30_to_v21(
+                    src_path, dst_path, _convert_progress_cb)
+            else:
+                result = lconv.convert_v21_to_v20(
+                    src_path, dst_path, _convert_progress_cb,
+                    recompute_stats=recompute_stats,
+                    video_stride=video_stride,
+                    include_video_stats=include_video_stats,
+                )
+
+            _set_convert_progress(
+                running=False,
+                finished_at=time.time(),
+                stage="done",
+                title="转换完成",
+                detail=f"输出: {result.get('output', dst_path)}",
+                current=_convert_progress.get("total", 1) or 1,
+                total=_convert_progress.get("total", 1) or 1,
+                result=result,
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            log.exception("转换失败")
+            _set_convert_progress(
+                running=False,
+                finished_at=time.time(),
+                stage="error",
+                title="转换失败",
+                detail=str(e),
+                error=str(e),
+            )
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({
+        "success": True,
+        "message": "转换任务已启动",
+        "source_version": src_version,
+        "target_version": target_version,
+    })
+
+
+@app.route("/api/convert/progress")
+def api_convert_progress():
+    return jsonify(_get_convert_progress())
+
+
+def _run_verify_stats(root_path: Path, *, stride: int, include_videos: bool,
+                      tol: float, progress_cb) -> dict:
+    """从原始 parquet/视频重新计算 stats, 并与 meta/stats.json 及
+    聚合 episodes_stats.jsonl 做对比, 返回一份完整 report。"""
+    import numpy as _np
+
+    info = json.loads((root_path / "meta" / "info.json").read_text(encoding="utf-8"))
+    if info.get("codebase_version") != lconv.V21:
+        raise ValueError("验证功能目前仅支持 v2.1 源数据集")
+
+    stored_stats: dict = {}
+    stats_path = root_path / "meta" / "stats.json"
+    if stats_path.exists():
+        try:
+            stored_stats = json.loads(stats_path.read_text(encoding="utf-8"))
+        except Exception:  # pylint: disable=broad-except
+            stored_stats = {}
+
+    aggregated_stats = None
+    eps_stats_path = root_path / "meta" / "episodes_stats.jsonl"
+    if eps_stats_path.exists():
+        try:
+            progress_cb({"stage": "aggregate", "title": "聚合 episodes_stats.jsonl (参考对比)",
+                         "detail": "", "current": 0, "total": 1})
+            rows = lconv._read_jsonl(eps_stats_path)  # pylint: disable=protected-access
+            agg = lconv.aggregate_stats(
+                [lconv._cast_stats_to_numpy(r["stats"]) for r in rows]  # pylint: disable=protected-access
+            )
+            agg.pop("__warnings__", None)
+            aggregated_stats = {k: {m: lconv._to_python(v) for m, v in sub.items()}  # pylint: disable=protected-access
+                                for k, sub in agg.items()}
+            progress_cb({"stage": "aggregate", "title": "聚合 episodes_stats.jsonl (参考对比)",
+                         "detail": f"{len(aggregated_stats)} 个 feature",
+                         "current": 1, "total": 1})
+        except Exception as e:  # pylint: disable=broad-except
+            aggregated_stats = {"__error__": str(e)}
+
+    raw = lconv.compute_raw_stats_v21(root_path, info, progress_cb,
+                                      video_stride=stride,
+                                      include_videos=include_videos)
+    raw_warnings = raw.pop("__warnings__", []) or []
+    raw.pop("__source__", None)
+    recomputed_stats = {k: {m: lconv._to_python(v) for m, v in sub.items()}  # pylint: disable=protected-access
+                        for k, sub in raw.items()}
+
+    progress_cb({"stage": "diff", "title": "逐 feature 对比",
+                 "current": 0, "total": 1})
+
+    def diff_two(a: dict, b: dict):
+        out = {}
+        keys = sorted(set(a.keys()) | set(b.keys()))
+        for k in keys:
+            av = a.get(k)
+            bv = b.get(k)
+            if av is None or bv is None:
+                out[k] = {"__missing_in__": ("a" if av is None else "b")}
+                continue
+            feat = {}
+            for m in ("mean", "std", "min", "max", "count"):
+                if m not in av or m not in bv:
+                    feat[m] = {"__missing__": True}
+                    continue
+                try:
+                    arr_a = _np.asarray(av[m], dtype=float)
+                    arr_b = _np.asarray(bv[m], dtype=float)
+                except Exception:  # pylint: disable=broad-except
+                    feat[m] = {"__error__": "cast-failed"}
+                    continue
+                if arr_a.shape != arr_b.shape:
+                    feat[m] = {"__shape_mismatch__": True,
+                               "shape_a": list(arr_a.shape),
+                               "shape_b": list(arr_b.shape)}
+                    continue
+                d = _np.abs(arr_a - arr_b)
+                denom = _np.maximum(_np.abs(arr_a), 1e-12)
+                rel = (d / denom) if arr_a.size > 0 else _np.zeros_like(d)
+                feat[m] = {
+                    "max_abs": float(d.max()) if d.size else 0.0,
+                    "max_rel": float(rel.max()) if rel.size else 0.0,
+                    "match": bool(d.max() <= tol) if d.size else True,
+                    "shape": list(arr_a.shape),
+                }
+            out[k] = feat
+        return out
+
+    def _overall_match(diff_map):
+        if not diff_map:
+            return None
+        mismatches = []
+        for k, mm in diff_map.items():
+            if "__missing_in__" in mm:
+                mismatches.append(f"{k} (missing)"); continue
+            for m, d in mm.items():
+                if isinstance(d, dict) and d.get("match") is False:
+                    mismatches.append(f"{k}.{m} (max_abs={d.get('max_abs'):.6g})")
+                elif isinstance(d, dict) and ("__shape_mismatch__" in d or "__missing__" in d):
+                    mismatches.append(f"{k}.{m} (shape/missing)")
+        return {"all_match": len(mismatches) == 0, "mismatches": mismatches[:200]}
+
+    diff_vs_stored = diff_two(recomputed_stats, stored_stats) if stored_stats else None
+    diff_vs_agg = (diff_two(recomputed_stats, aggregated_stats)
+                   if aggregated_stats and "__error__" not in aggregated_stats else None)
+    progress_cb({"stage": "diff", "title": "逐 feature 对比",
+                 "detail": "完成", "current": 1, "total": 1})
+
+    return {
+        "success": True,
+        "path": str(root_path),
+        "tolerance": tol,
+        "video_stride": stride,
+        "include_video_stats": include_videos,
+        "recomputed_keys": sorted(recomputed_stats.keys()),
+        "stored_stats_keys": sorted(stored_stats.keys()),
+        "aggregated_stats_keys": (sorted(aggregated_stats.keys())
+                                  if aggregated_stats and "__error__" not in aggregated_stats else None),
+        "recompute_warnings": raw_warnings,
+        "diff_recomputed_vs_stored": diff_vs_stored,
+        "diff_recomputed_vs_aggregated": diff_vs_agg,
+        "overall_recomputed_vs_stored": _overall_match(diff_vs_stored),
+        "overall_recomputed_vs_aggregated": _overall_match(diff_vs_agg),
+        "stats": {
+            "recomputed": recomputed_stats,
+            "stored": stored_stats,
+            "aggregated": (aggregated_stats
+                           if aggregated_stats and "__error__" not in aggregated_stats else None),
+        },
+    }
+
+
+@app.route("/api/convert/verify_stats", methods=["POST"])
+def api_convert_verify_stats():
+    """同步对比(兼容 converter 页面的 Step 4 校验面板)。大型视频集建议改用异步接口。"""
+    data = request.get_json() or {}
+    root = (data.get("path") or "").strip()
+    if not root:
+        return jsonify({"error": "path 不能为空"}), 400
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.exists():
+        return jsonify({"error": f"路径不存在: {root_path}"}), 400
+    try:
+        report = _run_verify_stats(
+            root_path,
+            stride=max(1, int(data.get("video_stride") or 1)),
+            include_videos=bool(data.get("include_video_stats", True)),
+            tol=float(data.get("max_abs_diff") or 1e-4),
+            progress_cb=lambda p: None,
+        )
+    except Exception as e:  # pylint: disable=broad-except
+        return jsonify({"error": str(e)}), 400
+    return jsonify(report)
+
+
+@app.route("/api/verify-stats/inspect", methods=["POST"])
+def api_verify_stats_inspect():
+    """快速扫描给定目录, 返回可校验的基本信息(不真正算 stats)。"""
+    data = request.get_json() or {}
+    root = (data.get("path") or "").strip()
+    if not root:
+        return jsonify({"error": "path 不能为空"}), 400
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.exists():
+        return jsonify({"error": f"路径不存在: {root_path}"}), 400
+    try:
+        summary = lconv.inspect_dataset(str(root_path))
+    except Exception as e:  # pylint: disable=broad-except
+        return jsonify({"error": str(e)}), 400
+
+    info = json.loads((root_path / "meta" / "info.json").read_text(encoding="utf-8"))
+    has_eps_stats = (root_path / "meta" / "episodes_stats.jsonl").exists()
+    has_stats_json = (root_path / "meta" / "stats.json").exists()
+
+    ep_parquets = list((root_path / "data").glob("chunk-*/episode_*.parquet"))
+    video_keys = [k for k, v in (info.get("features") or {}).items()
+                  if (v or {}).get("dtype") == "video"]
+    video_counts = {}
+    for cam in video_keys:
+        video_counts[cam] = len(list((root_path / "videos").glob(f"chunk-*/{cam}/episode_*.mp4")))
+
+    return jsonify({
+        "success": True,
+        "summary": summary,
+        "eligible": summary.get("codebase_version") == lconv.V21,
+        "has_episodes_stats_jsonl": has_eps_stats,
+        "has_stats_json": has_stats_json,
+        "num_episode_parquets": len(ep_parquets),
+        "video_keys": video_keys,
+        "video_episode_counts": video_counts,
+    })
+
+
+@app.route("/api/verify-stats/start", methods=["POST"])
+def api_verify_stats_start():
+    data = request.get_json() or {}
+    root = (data.get("path") or "").strip()
+    if not root:
+        return jsonify({"error": "path 不能为空"}), 400
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.exists():
+        return jsonify({"error": f"路径不存在: {root_path}"}), 400
+
+    stride = max(1, int(data.get("video_stride") or 1))
+    include_videos = bool(data.get("include_video_stats", True))
+    tol = float(data.get("max_abs_diff") or 1e-4)
+
+    with _verify_progress_lock:
+        if _verify_progress.get("running"):
+            return jsonify({"error": "已有校验任务在进行中"}), 400
+        _verify_progress.clear()
+        _verify_progress.update({
+            "running": True,
+            "stage": "init",
+            "title": "初始化",
+            "detail": "",
+            "current": 0,
+            "total": 1,
+            "percent": 0,
+            "started_at": time.time(),
+            "finished_at": None,
+            "error": None,
+            "result": None,
+            "path": str(root_path),
+        })
+
+    def worker():
+        try:
+            report = _run_verify_stats(
+                root_path, stride=stride,
+                include_videos=include_videos, tol=tol,
+                progress_cb=_verify_progress_cb,
+            )
+            _set_verify_progress(
+                running=False, finished_at=time.time(),
+                stage="done", title="校验完成",
+                detail=f"{len(report.get('recomputed_keys', []))} 个 feature 重算完成",
+                current=_verify_progress.get("total", 1) or 1,
+                total=_verify_progress.get("total", 1) or 1,
+                result=report,
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            log.exception("stats 校验失败")
+            _set_verify_progress(
+                running=False, finished_at=time.time(),
+                error=str(e), stage="error", title="失败", detail=str(e),
+            )
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"success": True, "message": "校验任务已启动", "path": str(root_path)})
+
+
+@app.route("/api/verify-stats/progress")
+def api_verify_stats_progress():
+    return jsonify(_get_verify_progress())
+
+
+@app.route("/api/verify-stats/cancel", methods=["POST"])
+def api_verify_stats_cancel():
+    # 目前无法真正打断 ffmpeg 管道, 但可以让前端停止轮询
+    _set_verify_progress(running=False, finished_at=time.time(),
+                         error="用户取消", stage="cancelled", title="已取消")
+    return jsonify({"success": True})
+
+
+@app.route("/api/convert/tree", methods=["POST"])
+def api_convert_tree():
+    data = request.get_json() or {}
+    out = {}
+    for side in ("left", "right"):
+        p = (data.get(side) or "").strip()
+        if not p:
+            out[side] = None
+            continue
+        try:
+            out[side] = lconv.build_tree(p)
+        except Exception as e:  # pylint: disable=broad-except
+            out[side] = {"error": str(e), "path": p}
+    if data.get("include_diff") and data.get("left") and data.get("right"):
+        try:
+            out["diff"] = lconv.compare_datasets(data["left"], data["right"])
+        except Exception as e:  # pylint: disable=broad-except
+            out["diff"] = {"error": str(e)}
+    return jsonify({"success": True, **out})
+
+
+@app.route("/api/convert/file_preview")
+def api_convert_file_preview():
+    path = (request.args.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "缺少 path 参数"}), 400
+    try:
+        payload = lconv.preview_file(path)
+        return jsonify({"success": True, "file": payload})
+    except Exception as e:  # pylint: disable=broad-except
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/convert/video_file")
+def api_convert_video_file():
+    path = (request.args.get("path") or "").strip()
+    if not path:
+        abort(400)
+    p = Path(path).expanduser().resolve()
+    if not p.exists() or not p.is_file():
+        abort(404)
+    if p.suffix.lower() not in {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}:
+        abort(400)
+    return send_file(str(p), mimetype="video/mp4")
 
 
 # ═══════════════════════ 入口 ═══════════════════════

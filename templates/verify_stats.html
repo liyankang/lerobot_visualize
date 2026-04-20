@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LeRobot Stats 校验 - 工具箱</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f0f2f5; color: #333;
+            min-height: 100vh; display: flex; flex-direction: column;
+        }
+        header {
+            background: #1a1a2e; color: #eee;
+            padding: 12px 24px; display: flex; align-items: center; gap: 16px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
+        header a { color: #aab; text-decoration: none; font-size: 13px; }
+        header a:hover { color: #fff; }
+        header h1 { font-size: 15px; font-weight: 600; }
+        header .spacer { flex: 1; }
+        header .version { font-size: 11px; color: #7a7a9c; }
+
+        .main {
+            flex: 1; max-width: 1240px; width: 100%; margin: 0 auto;
+            padding: 18px 24px;
+        }
+
+        .panel {
+            background: #fff; border-radius: 10px; padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 16px;
+        }
+        .panel h3 {
+            font-size: 15px; margin-bottom: 12px; color: #333;
+            border-bottom: 1px solid #f0f0f0; padding-bottom: 8px;
+        }
+        .panel h4 {
+            font-size: 13px; color: #666; margin: 14px 0 8px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+
+        .input-row {
+            display: flex; gap: 8px; align-items: center; margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+        .input-row label { min-width: 110px; font-size: 13px; color: #555; }
+        .input-row input[type="text"], .input-row input[type="number"] {
+            padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 13px;
+        }
+        .input-row input[type="text"] { flex: 1; font-family: monospace; min-width: 240px; }
+        .input-row input[type="number"] { width: 110px; }
+        .input-row input:focus { outline: none; border-color: #11998e; }
+        .input-row .hint { font-size: 11px; color: #888; }
+
+        .btn {
+            padding: 8px 18px; border: none; border-radius: 6px; font-size: 13px;
+            font-weight: 600; cursor: pointer; transition: all .15s;
+        }
+        .btn.primary { background: #11998e; color: #fff; }
+        .btn.primary:hover { background: #0c7c73; }
+        .btn.primary:disabled { background: #97d0c9; cursor: not-allowed; }
+        .btn.secondary { background: #e9ecef; color: #555; }
+        .btn.secondary:hover { background: #dee2e6; }
+        .btn.ghost { background: transparent; color: #666; border: 1px solid #ddd; }
+        .btn.small { padding: 4px 10px; font-size: 12px; }
+        .btn.danger { background: #c62828; color: #fff; }
+
+        .notice { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin: 8px 0; }
+        .notice.info { background: #e3f2fd; color: #0d47a1; }
+        .notice.warn { background: #fff3e0; color: #bf360c; }
+        .notice.error { background: #ffebee; color: #b71c1c; }
+        .notice.ok { background: #e8f5e9; color: #1b5e20; }
+
+        /* progress */
+        .progress-track {
+            width: 100%; height: 22px; background: #e9ecef; border-radius: 11px; overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%; background: linear-gradient(90deg, #11998e, #38ef7d);
+            color: #fff; font-size: 11px; font-weight: 700;
+            display: flex; align-items: center; justify-content: center;
+            transition: width .3s;
+        }
+        .progress-meta {
+            display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px;
+            font-size: 12px; color: #666;
+        }
+        .progress-meta span { background: #f8f9fa; border-radius: 999px; padding: 3px 10px; }
+
+        .summary-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 8px 16px; font-size: 13px;
+        }
+        .summary-grid .kv { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed #eee; }
+        .summary-grid .kv span:first-child { color: #888; }
+        .summary-grid .kv span:last-child { color: #333; font-weight: 600; }
+
+        .tag {
+            display: inline-block; padding: 2px 8px; border-radius: 8px;
+            background: #f8f9fa; color: #555; font-size: 11px; margin: 2px 4px 2px 0;
+        }
+        .tag.ok { background: #e8f5e9; color: #1b5e20; }
+        .tag.bad { background: #ffebee; color: #b71c1c; }
+
+        table.diff-table {
+            width: 100%; border-collapse: collapse; font-size: 12px;
+        }
+        table.diff-table thead {
+            background: #f5f5f5; position: sticky; top: 0;
+        }
+        table.diff-table th, table.diff-table td {
+            padding: 5px 10px; text-align: left; border-bottom: 1px solid #f0f0f0;
+        }
+        table.diff-table td.num { font-family: monospace; text-align: right; }
+        table.diff-table tr:hover { background: #fafbfc; }
+
+        .overall-card {
+            padding: 10px 14px; border-radius: 8px; font-size: 13px;
+            margin-bottom: 8px; border: 1px solid;
+        }
+        .overall-card.ok { background: #e8f5e9; color: #1b5e20; border-color: #81c784; }
+        .overall-card.bad { background: #fff3e0; color: #e65100; border-color: #ffb74d; }
+        .overall-card .mismatches { margin-top: 6px; font-family: monospace; font-size: 11px; max-height: 120px; overflow: auto; }
+
+        /* directory picker modal */
+        .modal-backdrop {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.4); z-index: 1000;
+            align-items: center; justify-content: center;
+        }
+        .modal-backdrop.active { display: flex; }
+        .modal {
+            background: #fff; border-radius: 10px; padding: 20px;
+            width: min(620px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
+        }
+        .modal h3 { font-size: 15px; margin-bottom: 10px; }
+        .modal .current { font-family: monospace; font-size: 12px; color: #555; margin-bottom: 6px; word-break: break-all; }
+        .modal .dir-list {
+            flex: 1; overflow: auto; border: 1px solid #eee; border-radius: 6px;
+            font-size: 13px;
+        }
+        .modal .dir-item {
+            padding: 6px 10px; cursor: pointer; border-bottom: 1px solid #f5f5f5;
+        }
+        .modal .dir-item:hover { background: #f8f9fa; }
+        .modal .dir-item.parent { color: #11998e; }
+        .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+        .modal input[type="text"] {
+            width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 12px; font-family: monospace;
+        }
+
+        footer { text-align: center; padding: 12px; font-size: 12px; color: #999; }
+    </style>
+</head>
+<body>
+<header>
+    <a href="/">← 返回门户</a>
+    <h1>LeRobot Stats 准确性校验</h1>
+    <div class="spacer"></div>
+    <span class="version">支持 v2.1</span>
+    <a href="/docs/lerobot_format_conversion.md" target="_blank" style="color:#7aa2f7;font-size:12px">格式文档</a>
+</header>
+
+<div class="main">
+
+    <!-- Step 1: 选择数据集 -->
+    <div class="panel">
+        <h3>1. 选择要校验的 LeRobot 数据集</h3>
+        <div class="notice info">
+            工具会从原始 <code>data/*.parquet</code> + <code>videos/**/*.mp4</code> 重新计算每个 feature 的 <b>mean / std / min / max / count</b>,
+            然后与数据集自带的 <code>meta/stats.json</code> 以及聚合 <code>meta/episodes_stats.jsonl</code> 的结果逐项交叉对比。
+            目前仅支持 <b>v2.1</b> 数据集(v3.0 可先用 "LeRobot 版本转换" 工具转回 v2.1 再做校验)。
+        </div>
+
+        <div class="input-row">
+            <label>数据集路径</label>
+            <input type="text" id="ds-path" placeholder="/abs/path/to/lerobot_dataset_v21">
+            <button class="btn ghost small" id="ds-browse">浏览…</button>
+            <button class="btn primary" id="ds-inspect">扫描</button>
+        </div>
+
+        <div id="ds-summary" style="display:none"></div>
+    </div>
+
+    <!-- Step 2: 校验参数 -->
+    <div class="panel" id="panel-params" style="display:none">
+        <h3>2. 校验参数</h3>
+        <div class="input-row">
+            <label>视频抽帧步长</label>
+            <input type="number" id="opt-stride" value="5" min="1" max="60">
+            <span class="hint">1 = 全部解码最准；5 代表每 5 帧取 1 帧(约快 5×, 误差通常 &lt; 1%)</span>
+        </div>
+        <div class="input-row">
+            <label>包含视频 stats</label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+                <input type="checkbox" id="opt-include-video" checked> 解码视频并计算 per-channel stats
+            </label>
+            <span class="hint">取消勾选则只重算 parquet 数值列, 秒级完成</span>
+        </div>
+        <div class="input-row">
+            <label>容忍阈值</label>
+            <input type="number" id="opt-tol" value="0.0001" step="0.0001">
+            <span class="hint">绝对差 ≤ 阈值视为匹配 (绿色), 否则标红</span>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+            <button class="btn primary" id="btn-start">开始校验</button>
+        </div>
+    </div>
+
+    <!-- Step 3: 进度 -->
+    <div class="panel" id="panel-progress" style="display:none">
+        <h3>3. 执行中</h3>
+        <div id="run-status" class="notice info">等待启动…</div>
+        <div class="progress-track"><div class="progress-bar" id="progress-bar" style="width:0%">0%</div></div>
+        <div id="progress-detail" style="font-size:12px;color:#666;margin-top:8px"></div>
+        <div class="progress-meta" id="progress-meta"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+            <button class="btn danger small" id="btn-cancel" style="display:none">中止轮询</button>
+        </div>
+    </div>
+
+    <!-- Step 4: 结果 -->
+    <div class="panel" id="panel-result" style="display:none">
+        <h3>4. 校验结果</h3>
+        <div id="result-overall"></div>
+        <div id="result-keylist" style="font-size:12px;color:#555;margin:8px 0"></div>
+
+        <h4>逐 feature 误差表</h4>
+        <div class="input-row" style="margin-bottom:6px">
+            <label>对比对象</label>
+            <select id="result-target" style="padding:6px 10px;border:1px solid #ddd;border-radius:6px;font-size:13px"></select>
+            <label style="margin-left:14px;display:flex;align-items:center;gap:6px;font-size:12px">
+                <input type="checkbox" id="result-only-mismatch"> 只显示不匹配
+            </label>
+            <span class="spacer" style="flex:1"></span>
+            <button class="btn ghost small" id="btn-export">导出 JSON</button>
+        </div>
+        <div style="max-height:480px;overflow:auto;border:1px solid #e0e0e0;border-radius:6px">
+            <table class="diff-table" id="diff-table">
+                <thead>
+                    <tr>
+                        <th>feature</th>
+                        <th style="text-align:right">mean</th>
+                        <th style="text-align:right">std</th>
+                        <th style="text-align:right">min</th>
+                        <th style="text-align:right">max</th>
+                        <th style="text-align:right">count</th>
+                        <th style="text-align:right">状态</th>
+                    </tr>
+                </thead>
+                <tbody id="diff-tbody"></tbody>
+            </table>
+        </div>
+        <div style="font-size:10px;color:#999;margin-top:4px">
+            数字代表 <code>max |重算 − 源|</code> 的绝对值，在容忍阈值之内显示为绿色。
+            点击行可展开查看完整 mean / std 等逐维度数值对比。
+        </div>
+    </div>
+
+</div>
+
+<!-- 目录选择 modal -->
+<div class="modal-backdrop" id="browse-modal">
+    <div class="modal">
+        <h3 id="browse-title">选择目录</h3>
+        <div class="current" id="browse-current">/</div>
+        <input type="text" id="browse-input" placeholder="直接输入绝对路径…">
+        <div class="dir-list" id="browse-list"></div>
+        <div class="actions">
+            <button class="btn secondary" id="browse-cancel">取消</button>
+            <button class="btn primary" id="browse-ok">使用该目录</button>
+        </div>
+    </div>
+</div>
+
+<footer>LeRobot Toolbox · Stats Verify</footer>
+
+<script src="/static/verify_stats.js"></script>
+</body>
+</html>

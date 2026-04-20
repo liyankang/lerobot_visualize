@@ -18,6 +18,8 @@ const S = {
     chart: null,            // 合并后的单一图表
     chartMode: 'both',      // 'both' | 'state' | 'action'
     videoPlaying: false, videoFrame: 0, videoTotalFrames: 0, videoTimer: null, videoRaf: null,
+    integrity: null,        // 一致性检查结果: null=未执行, {}=结果
+    integrityChecking: false,
     chartClickState: 0,     // 0=空闲, 1=等待结束帧
     bridgePreview: [],      // 桥接帧预览 (分析模态框打开时高亮)
     uiLocked: false,        // 保存期间锁住页面交互
@@ -431,9 +433,101 @@ async function loadDataset() {
         updateUrdfUploadStatus(`已加载 ${S.urdf.robotName || 'URDF'}，${mapping.text}`);
         if (S.urdf.jointMap.length) showJointMappingModal();
     }
+    S.integrity = null;
     renderSummary(); renderMergeQueue(); renderEpList(); renderJointSel(); hideDetail();
     $('save-path').value = path+'_edited';
     toast(`已加载: ${d.summary.total_episodes} ep, ${d.summary.total_frames} 帧`,'success');
+    runIntegrityCheck();
+}
+
+async function runIntegrityCheck() {
+    if (S.integrityChecking) return;
+    S.integrityChecking = true;
+    renderSummary();
+    try {
+        const r = await fetch('/api/integrity');
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        S.integrity = d;
+        renderSummary();
+        if (d.error_count > 0) {
+            toast(`⚠ 一致性检查: ${d.error_count} 路视频与 parquet 不一致 (涉及 ${d.affected_episodes.length} 集)，点顶部红色角标查看`, 'error');
+        } else if (d.warning_count > 0) {
+            toast(`一致性检查: ${d.warning_count} 项警告 (如 ffprobe 探测失败)`, 'info');
+        }
+    } catch (e) {
+        console.error('integrity check failed', e);
+    } finally {
+        S.integrityChecking = false;
+        renderSummary();
+    }
+}
+
+function showIntegrityModal() {
+    if (!S.integrity) return;
+    const d = S.integrity;
+    const existing = document.getElementById('integ-modal');
+    if (existing) existing.remove();
+
+    let bodyHtml = `<div class="integ-hint">
+        共检查 <b>${d.total_videos_checked}</b> 路视频 / <b>${d.total_episodes_checked}</b> 集，
+        error <b style="color:#e74c3c">${d.error_count}</b>，
+        warning <b style="color:#b7750a">${d.warning_count}</b>。
+        info.json fps = <b>${d.info_fps}</b>。
+        ${d.ffprobe_missing ? '<span style="color:#c0392b">⚠ 所有探测均失败，请确认 ffprobe 已安装。</span>' : ''}
+        <br>命中一致性问题时, 视频与 parquet 曲线<b>不是按同一时间轴同步</b>的, 播放器会出现画面与曲线错位; 建议重新生成数据集或核对 meta/info.json 的 fps 字段。
+    </div>`;
+
+    if (!d.episodes || !d.episodes.length) {
+        bodyHtml += `<div style="text-align:center;padding:20px;color:#27ae60;">✓ 全部通过</div>`;
+    } else {
+        let rows = '';
+        for (const ep of d.episodes) {
+            for (const cam of ep.cameras) {
+                if (!cam.issues.length) continue;
+                const lvl = cam.issues.some(i => i.level === 'error') ? 'error' : 'warning';
+                const fpsCell = cam.video_fps == null ? '—' : cam.video_fps.toFixed(3);
+                const framesCell = cam.video_nb_frames == null ? '—' : cam.video_nb_frames;
+                const durCell = cam.video_duration == null ? '—' : cam.video_duration.toFixed(3) + 's';
+                const issueHtml = cam.issues.map(i =>
+                    `<span class="integ-issue ${i.level === 'warning' ? 'warn' : ''}">• ${i.message}</span>`
+                ).join('');
+                rows += `<tr class="integ-${lvl}">
+                    <td class="integ-num">${ep.episode_index}</td>
+                    <td>${cam.camera}</td>
+                    <td class="integ-num">${fpsCell}</td>
+                    <td class="integ-num">${framesCell}</td>
+                    <td class="integ-num">${cam.parquet_rows}</td>
+                    <td class="integ-num">${durCell}</td>
+                    <td>${issueHtml}</td>
+                </tr>`;
+            }
+        }
+        bodyHtml += `<table class="integ-tbl">
+            <thead><tr>
+                <th>Ep</th><th>相机</th><th>视频 fps</th><th>视频帧数</th>
+                <th>parquet 行数</th><th>视频时长</th><th>问题</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    const html = `<div class="modal-overlay" id="integ-modal" onclick="if(event.target===this)closeIntegrityModal()">
+        <div class="modal-card" style="width:820px;max-width:94vw;">
+            <div class="modal-hdr"><h3>数据集一致性检查</h3><button class="modal-close" onclick="closeIntegrityModal()">×</button></div>
+            <div class="modal-body">${bodyHtml}</div>
+            <div class="modal-footer">
+                <button class="bp" onclick="runIntegrityCheck();closeIntegrityModal();">重新检查</button>
+                <button class="bg" onclick="closeIntegrityModal()">关闭</button>
+            </div>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function closeIntegrityModal() {
+    const m = document.getElementById('integ-modal');
+    if (m) m.remove();
 }
 
 async function addMergeDataset() {
@@ -1225,6 +1319,19 @@ function onSliderInput(v) { videoPause(); S.videoFrame=parseInt(v)||0; videoSync
 function renderSummary() {
     const s=S.dataset; if(!s) return;
     const mergeFrames = S.mergeDatasets.reduce((sum, item) => sum + (item.summary?.total_frames || 0), 0);
+    let integHtml = '';
+    if (S.integrityChecking) {
+        integHtml = ' <span class="bw" style="background:#888;cursor:default;">一致性检查中…</span>';
+    } else if (S.integrity) {
+        const it = S.integrity;
+        if (it.error_count > 0) {
+            integHtml = ` <span class="be" title="点击查看详情" onclick="showIntegrityModal()">⚠ 一致性 ${it.error_count} 错误 / ${it.affected_episodes.length} 集</span>`;
+        } else if (it.warning_count > 0) {
+            integHtml = ` <span class="bw" style="cursor:pointer;" title="点击查看详情" onclick="showIntegrityModal()">一致性 ${it.warning_count} 警告</span>`;
+        } else {
+            integHtml = ` <span class="bo" title="点击查看详情" onclick="showIntegrityModal()">✓ 一致性 OK</span>`;
+        }
+    }
     $('si').innerHTML =
         `<span>FPS:<b>${s.fps}</b></span>`+
         `<span>机器人:<b>${s.robot_type}</b></span>`+
@@ -1232,7 +1339,8 @@ function renderSummary() {
         `<span>帧:<b>${s.total_frames}</b></span>`+
         `<span>摄像头:${s.cameras.length?s.cameras.join(','):'无'}</span>`+
         (S.mergeDatasets.length ? ` <span class="bm">待拼接 ${S.mergeDatasets.length} 个 / ${mergeFrames} 帧</span>` : '')+
-        (s.modified?' <span class="bw">已修改</span>':'');
+        (s.modified?' <span class="bw">已修改</span>':'')+
+        integHtml;
 }
 
 function renderMergeQueue() {
