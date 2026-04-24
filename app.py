@@ -37,6 +37,8 @@ try:
 except ImportError:
     _HAS_SCIPY = False
 
+import image_analyzer as img_analyzer
+
 # ═══════════════════════ 配置 ═══════════════════════
 
 app = Flask(__name__)
@@ -56,6 +58,51 @@ _save_progress = {
     "total": 0,
 }
 _urdf_assets = {}
+
+# 图像分析全局状态
+_img_analyzer = None
+_img_analysis_lock = threading.Lock()
+_img_analysis_progress = {
+    "running": False,
+    "stage": "",
+    "title": "",
+    "detail": "",
+    "current": 0,
+    "total": 0,
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+    "result": None,
+}
+
+
+def _set_img_analysis_progress(**kwargs):
+    with _img_analysis_lock:
+        _img_analysis_progress.update(kwargs)
+
+
+def _img_analysis_progress_cb(stage, title, detail, current, total):
+    with _img_analysis_lock:
+        _img_analysis_progress["stage"] = stage
+        _img_analysis_progress["title"] = title
+        _img_analysis_progress["detail"] = detail or ""
+        _img_analysis_progress["current"] = int(current)
+        _img_analysis_progress["total"] = int(total)
+
+
+def _get_img_analysis_progress():
+    with _img_analysis_lock:
+        data = dict(_img_analysis_progress)
+    started_at = data.get("started_at")
+    finished_at = data.get("finished_at")
+    now = time.time()
+    total = max(0, int(data.get("total", 0) or 0))
+    current = max(0, int(data.get("current", 0) or 0))
+    data["percent"] = max(0, min(100, round(current * 100 / total))) if total > 0 else 0
+    if started_at:
+        end = finished_at or now
+        data["elapsed_sec"] = max(0.0, end - started_at)
+    return data
 
 
 def set_save_progress(stage, title, detail="", current=0, total=0, active=True):
@@ -3189,6 +3236,11 @@ def converter_page():
     return render_template("converter.html")
 
 
+@app.route("/image-analysis")
+def image_analysis_page():
+    return render_template("image_analysis.html")
+
+
 @app.route("/verify-stats")
 def verify_stats_page():
     return render_template("verify_stats.html")
@@ -4507,6 +4559,127 @@ def api_convert_video_file():
     if p.suffix.lower() not in {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}:
         abort(400)
     return send_file(str(p), mimetype="video/mp4")
+
+
+# ═══════════════════════ 图像质量分析 API ═══════════════════════
+
+
+@app.route("/api/image-analysis/load", methods=["POST"])
+def api_image_analysis_load():
+    global _img_analyzer
+    data = request.get_json() or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "请输入数据集路径"}), 400
+
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        return jsonify({"error": f"路径不存在: {path}"}), 400
+    if not (p / "meta" / "info.json").exists():
+        return jsonify({"error": "无效的 LeRobot 数据集 (缺少 meta/info.json)"}), 400
+
+    try:
+        _img_analyzer = img_analyzer.ImageAnalyzer(str(p))
+        info = _img_analyzer.get_dataset_info()
+        return jsonify({"success": True, **info})
+    except Exception as e:
+        log.exception("图像分析: 加载数据集失败")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/image-analysis/start", methods=["POST"])
+def api_image_analysis_start():
+    global _img_analyzer
+    if _img_analyzer is None:
+        return jsonify({"error": "请先加载数据集"}), 400
+
+    data = request.get_json() or {}
+    camera = (data.get("camera") or "").strip()
+    if not camera:
+        return jsonify({"error": "请选择相机"}), 400
+
+    episodes = data.get("episodes")
+
+    with _img_analysis_lock:
+        if _img_analysis_progress.get("running"):
+            return jsonify({"error": "已有分析任务在进行中"}), 400
+        _img_analysis_progress.clear()
+        _img_analysis_progress.update({
+            "running": True,
+            "stage": "init",
+            "title": "初始化",
+            "detail": "",
+            "current": 0,
+            "total": 1,
+            "percent": 0,
+            "started_at": time.time(),
+            "finished_at": None,
+            "error": None,
+            "result": None,
+        })
+
+    analyzer = _img_analyzer
+
+    def worker():
+        try:
+            report = analyzer.analyze(
+                camera, episodes=episodes,
+                progress_cb=_img_analysis_progress_cb,
+            )
+            _set_img_analysis_progress(
+                running=False, finished_at=time.time(),
+                stage="done", title="分析完成",
+                detail=f"{report.get('episodes_analyzed', 0)} 个 episode 已分析",
+                current=_img_analysis_progress.get("total", 1) or 1,
+                total=_img_analysis_progress.get("total", 1) or 1,
+                result=report,
+            )
+        except Exception as e:
+            log.exception("图像质量分析失败")
+            _set_img_analysis_progress(
+                running=False, finished_at=time.time(),
+                error=str(e), stage="error", title="分析失败", detail=str(e),
+            )
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"success": True, "message": "分析任务已启动"})
+
+
+@app.route("/api/image-analysis/progress")
+def api_image_analysis_progress():
+    return jsonify(_get_img_analysis_progress())
+
+
+@app.route("/api/image-analysis/episode-detail")
+def api_image_analysis_episode_detail():
+    if _img_analyzer is None:
+        return jsonify({"error": "未加载数据集"}), 400
+    ep_idx = request.args.get("episode", type=int)
+    if ep_idx is None:
+        return jsonify({"error": "缺少 episode 参数"}), 400
+    detail = _img_analyzer.get_episode_detail(ep_idx)
+    if detail is None:
+        return jsonify({"error": f"Episode {ep_idx} 无缓存数据"}), 404
+    return jsonify({"success": True, **detail})
+
+
+@app.route("/api/image-analysis/frame")
+def api_image_analysis_frame():
+    if _img_analyzer is None:
+        abort(400)
+    camera = (request.args.get("camera") or "").strip()
+    ep_idx = request.args.get("episode", type=int)
+    frame_idx = request.args.get("frame", type=int)
+    if not camera or ep_idx is None or frame_idx is None:
+        abort(400)
+
+    jpeg_data = _img_analyzer.extract_frame_jpeg(camera, ep_idx, frame_idx)
+    if jpeg_data is None:
+        abort(404)
+
+    from io import BytesIO
+    return send_file(BytesIO(jpeg_data), mimetype="image/jpeg",
+                     download_name=f"ep{ep_idx}_frame{frame_idx}.jpg")
 
 
 # ═══════════════════════ 入口 ═══════════════════════

@@ -1,6 +1,6 @@
 # LeRobot 工具箱
 
-基于 Web 的 LeRobot v2.1 数据集工具集合，包含可视化编辑器、VLA 数据分析页和 ROS2 Bag 转换工具。
+基于 Web 的 LeRobot v2.1 数据集工具集合，包含可视化编辑器、VLA 数据分析页、图像质量分析和 ROS2 Bag 转换工具。
 
 启动后访问 `http://localhost:7860` 进入工具箱门户页，选择所需工具。
 
@@ -10,6 +10,7 @@
 |------|------|------|
 | 可视化编辑器 | `/visualize` | 浏览、编辑 LeRobot v2.1 数据集 |
 | LeRobot 数据分析 | `/data-analysis` | 按 joint group 选择单个 joint，查看位值 / 速度双图联动分析 |
+| 图像质量分析 | `/image-analysis` | 分析视频帧的模糊度、亮度、曝光、信息熵、帧间一致性及关节速度-模糊度关联 |
 | ROS2 Bag 转换 | `/ros2-convert` | 将 ROS2 bag 转换为 LeRobot v2.1 格式 |
 | LeRobot 版本转换 | `/converter` | 在 LeRobot 数据集 v2.0 / v2.1 / v3.0 之间互转，附带目录对比 |
 
@@ -255,22 +256,70 @@ python app.py [--port 7860] [--host 0.0.0.0] [--joint-config path/to/joint_confi
 - 当前页面默认隐藏加速度、加加速度图，但后端计算逻辑保留，后续可继续扩展
 - 位值与速度图使用同一组时间轴，方便直接比较同一时刻的变化
 
+## 工具五: 图像质量分析
+
+面向 VLA 数据集的视频帧质量检测页。用 ffmpeg 逐帧解码后计算多项指标，快速定位模糊、过暗、过曝或信息量低的帧，辅助排查数据质量问题。
+
+### 分析指标
+
+| 维度 | 指标 | 算法 | 说明 |
+|------|------|------|------|
+| 清晰度 | 模糊度 | Laplacian 方差 | 值越高越清晰，<50 判定模糊 |
+| 光照 | 亮度 | 灰度均值 / 255 | 0=全黑, 1=全白, [0.15, 0.85] 为正常 |
+| 光照 | 过曝率 | 像素>250 占比 | >10% 判定过曝 |
+| 光照 | 曝光不足率 | 像素<5 占比 | >10% 判定过暗 |
+| 信息量 | 信息熵 | Shannon 熵 (0-8 bits) | <4 判定信息量低 (可能遮挡/纯色) |
+| 纹理 | 对比度 | 灰度标准差 / 255 | <0.05 判定低对比度 |
+| 时序 | 帧间差异 | 相邻帧灰度绝对差均值 | <0.002 判定静止帧, >0.30 判定场景突变 |
+| 关联 | 速度-模糊度 | Pearson 相关系数 | 负相关说明高速运动导致图像模糊 |
+
+### 综合评分
+
+每帧按加权公式计算 0-100 的综合质量评分：
+
+| 子项 | 权重 |
+|------|------|
+| 模糊度 | 35% |
+| 信息熵 | 20% |
+| 亮度 | 15% |
+| 对比度 | 15% |
+| 曝光 | 15% |
+
+Episode 质量评分取所有帧的均值。
+
+### 使用流程
+
+1. 访问 `/image-analysis`
+2. 输入 LeRobot v2.1 数据集路径并加载
+3. 选择要分析的相机
+4. 点击「开始分析」，等待逐帧分析完成（进度条实时显示）
+5. 查看分析结果：
+   - **质量概览** — 综合评分、各指标均值、问题帧占比
+   - **Episode 质量分布** — 每个 episode 的质量评分柱状图
+   - **指标分布图** — 模糊度/亮度/信息熵/对比度的 episode 均值对比
+   - **逐帧时间线** — 选择 episode 查看各指标随时间的变化曲线
+   - **问题帧列表** — 被标记异常的帧及其原因
+   - **关节速度-模糊度散点图** — 高速运动时图像是否模糊
+
 ## 项目结构
 
 ```
 lerobot_visualize/
 ├── app.py                  # Flask 后端 + 可视化编辑器 / 分析页 / ROS2 / 版本转换 API 路由
+├── image_analyzer.py       # 图像质量分析核心: 逐帧解码 + 指标计算 + 评分
 ├── ros2_converter.py       # ROS2 Bag 转换核心: 扫描/解析/对齐/转换
 ├── lerobot_converter.py    # LeRobot 版本转换核心: v2.0 / v2.1 / v3.0 互转 + 目录对比
 ├── templates/
 │   ├── portal.html         # 工具箱门户首页
 │   ├── index.html          # 可视化编辑器页面
 │   ├── analysis.html       # 数据分析页面
+│   ├── image_analysis.html # 图像质量分析页面
 │   ├── ros2_convert.html   # ROS2 Bag 转换页面
 │   └── converter.html      # LeRobot 版本转换页面
 ├── static/
 │   ├── app.js              # 可视化编辑器前端 (Three.js + urdf-loader + Chart.js)
 │   ├── analysis_app.js     # 数据分析页前端
+│   ├── image_analysis_app.js # 图像质量分析前端 (Chart.js)
 │   ├── ros2_app.js         # ROS2 转换前端交互
 │   └── converter.js        # 版本转换前端交互
 ├── docs/
@@ -305,6 +354,15 @@ lerobot_visualize/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/analysis/load` | 加载数据集并生成 joint group 分析报告 |
+
+### 图像质量分析
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/image-analysis/load` | 加载数据集，扫描视频，返回相机列表 |
+| POST | `/api/image-analysis/start` | 启动图像质量分析（异步） |
+| GET | `/api/image-analysis/progress` | 轮询分析进度，完成时返回结果 |
+| GET | `/api/image-analysis/episode-detail` | 获取指定 episode 的逐帧指标 |
 
 ### ROS2 Bag 转换
 

@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>图像质量分析 - LeRobot 工具箱</title>
+    <script src="{{ url_for('static', filename='vendor/chart.umd.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='vendor/hammer.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='vendor/chartjs-plugin-zoom.min.js') }}"></script>
+    <style>
+        :root {
+            --bg: #f3f5f8;
+            --panel: #ffffff;
+            --line: #d9dde4;
+            --text: #1f2937;
+            --muted: #667085;
+            --blue: #2563eb;
+            --cyan: #0891b2;
+            --orange: #ea580c;
+            --rose: #be123c;
+            --green: #15803d;
+            --red: #b42318;
+            --purple: #7c3aed;
+            --amber: #d97706;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        header {
+            background: var(--panel);
+            border-bottom: 1px solid var(--line);
+            padding: 14px 18px;
+        }
+
+        .header-inner {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            gap: 14px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .back-link {
+            color: var(--blue);
+            text-decoration: none;
+            font-size: 13px;
+        }
+
+        .title-wrap h1 { font-size: 18px; font-weight: 600; }
+        .title-wrap p { margin-top: 4px; font-size: 12px; color: var(--muted); }
+
+        main {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 18px;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+        }
+
+        .toolbar {
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .toolbar h2 { font-size: 16px; margin-bottom: 6px; }
+        .toolbar p { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+
+        .input-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .path-input {
+            flex: 1;
+            min-width: 280px;
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fff;
+            color: var(--text);
+        }
+
+        .path-input:focus { outline: none; border-color: var(--blue); }
+
+        .primary-btn {
+            padding: 10px 14px;
+            border: 1px solid var(--blue);
+            border-radius: 8px;
+            background: var(--blue);
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .primary-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .secondary-btn {
+            padding: 10px 14px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: #fff;
+            color: var(--text);
+            font-size: 14px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .secondary-btn:hover { border-color: #b8c1cc; background: #f9fafb; }
+
+        select.cam-select {
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fff;
+            color: var(--text);
+            cursor: pointer;
+            min-width: 180px;
+        }
+
+        .status-line {
+            margin-top: 10px;
+            font-size: 13px;
+            color: var(--muted);
+        }
+        .status-line.success { color: var(--green); }
+        .status-line.error { color: var(--red); }
+        .status-line.loading { color: var(--blue); }
+
+        .summary-strip {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        .summary-chip {
+            padding: 12px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--line);
+            background: var(--panel);
+        }
+
+        .summary-chip .label {
+            display: block;
+            font-size: 11px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .summary-chip .value {
+            display: block;
+            margin-top: 6px;
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .summary-chip .sub {
+            display: block;
+            margin-top: 2px;
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .grade-excellent { color: var(--green); }
+        .grade-good { color: var(--cyan); }
+        .grade-acceptable { color: var(--amber); }
+        .grade-poor { color: var(--orange); }
+        .grade-bad { color: var(--red); }
+
+        .progress-bar-wrap {
+            margin: 16px 0;
+            padding: 16px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+        }
+
+        .progress-bar-track {
+            height: 8px;
+            background: #e5e7eb;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: var(--blue);
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+
+        .progress-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            color: var(--muted);
+        }
+
+        .section-head {
+            margin-bottom: 12px;
+            margin-top: 24px;
+        }
+        .section-head h3 { font-size: 16px; font-weight: 600; }
+        .section-head p { margin-top: 4px; font-size: 12px; color: var(--muted); }
+
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .chart-card {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 14px;
+        }
+
+        .chart-card h4 {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .chart-card .subtitle {
+            font-size: 12px;
+            color: var(--muted);
+            margin-bottom: 10px;
+        }
+
+        .chart-canvas-wrap {
+            position: relative;
+            width: 100%;
+            height: 300px;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+            overflow: hidden;
+        }
+
+        .chart-canvas-wrap canvas {
+            touch-action: none;
+        }
+
+        .chart-canvas-wrap.tall { height: 360px; }
+
+        .episode-detail-panel {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .detail-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+
+        .detail-header h4 { font-size: 14px; font-weight: 600; }
+
+        .detail-select {
+            padding: 8px 12px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            font-size: 13px;
+            background: #fff;
+            cursor: pointer;
+        }
+
+        .problem-table-wrap {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+        }
+
+        table.problem-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .problem-table th,
+        .problem-table td {
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .problem-table th {
+            background: #f8fafc;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+
+        .problem-table tr:last-child td { border-bottom: none; }
+
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-right: 4px;
+        }
+
+        .tag-blurry { background: #fef3c7; color: #92400e; }
+        .tag-dark { background: #e0e7ff; color: #3730a3; }
+        .tag-bright { background: #fef9c3; color: #854d0e; }
+        .tag-overexposed { background: #fee2e2; color: #991b1b; }
+        .tag-underexposed { background: #dbeafe; color: #1e40af; }
+        .tag-low_info { background: #f3e8ff; color: #6b21a8; }
+        .tag-static { background: #e5e7eb; color: #374151; }
+        .tag-scene_change { background: #fce7f3; color: #9d174d; }
+
+        .correlation-info {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 12px 16px;
+            background: #f8fafc;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .corr-value {
+            font-size: 28px;
+            font-weight: 700;
+            font-family: "SFMono-Regular", Consolas, monospace;
+        }
+
+        .corr-label {
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .term-help {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            border: 1px solid var(--line);
+            border-radius: 50%;
+            font-size: 11px;
+            color: var(--muted);
+            cursor: help;
+            background: #fff;
+            flex-shrink: 0;
+            vertical-align: middle;
+            margin-left: 4px;
+        }
+
+        .term-help::after {
+            content: attr(data-tip);
+            position: absolute;
+            left: 50%;
+            bottom: calc(100% + 8px);
+            transform: translateX(-50%);
+            width: min(420px, 80vw);
+            padding: 12px 14px;
+            border-radius: 8px;
+            background: #111827;
+            color: #f9fafb;
+            font-size: 12px;
+            line-height: 1.7;
+            white-space: pre-line;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 100;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+            transition: opacity 0.15s;
+        }
+
+        .term-help:hover::after,
+        .term-help:focus-visible::after {
+            opacity: 1;
+        }
+
+        .summary-chip .label-row {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+        }
+
+        .chart-title-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-bottom: 4px;
+        }
+
+        .chart-title-row h4 {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 0;
+        }
+
+        .frame-gallery {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+            margin-top: 10px;
+            min-height: 40px;
+        }
+
+        .frame-thumb {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            overflow: hidden;
+            cursor: pointer;
+            background: #f8fafc;
+            transition: box-shadow 0.15s, transform 0.15s;
+        }
+
+        .frame-thumb:hover {
+            box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+            transform: translateY(-2px);
+        }
+
+        .frame-thumb img {
+            width: 100%;
+            aspect-ratio: 16/9;
+            object-fit: cover;
+            display: block;
+            background: #e5e7eb;
+        }
+
+        .frame-thumb-info {
+            padding: 6px 8px;
+        }
+
+        .frame-thumb-info .frame-num {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .frame-thumb-info .frame-tags {
+            margin-top: 4px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 3px;
+        }
+
+        .frame-thumb-info .frame-metrics {
+            margin-top: 4px;
+            font-size: 10px;
+            color: var(--muted);
+            line-height: 1.5;
+        }
+
+        .lightbox {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .lightbox-inner {
+            position: relative;
+            max-width: 90vw;
+            max-height: 90vh;
+        }
+
+        .lightbox-inner img {
+            max-width: 90vw;
+            max-height: 80vh;
+            border-radius: 8px;
+            display: block;
+        }
+
+        .lightbox-info {
+            position: absolute;
+            bottom: -40px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            color: #e5e7eb;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .lightbox-close {
+            position: absolute;
+            top: -36px;
+            right: 0;
+            background: none;
+            border: none;
+            color: #e5e7eb;
+            font-size: 28px;
+            cursor: pointer;
+            padding: 4px 8px;
+        }
+
+        .lightbox-close:hover { color: #fff; }
+
+        .lightbox-nav {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(255,255,255,0.15);
+            border: none;
+            color: #fff;
+            font-size: 36px;
+            padding: 8px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            backdrop-filter: blur(4px);
+        }
+
+        .lightbox-nav:hover { background: rgba(255,255,255,0.3); }
+        .lightbox-prev { left: -60px; }
+        .lightbox-next { right: -60px; }
+
+        @media (max-width: 720px) {
+            .lightbox-prev { left: 4px; }
+            .lightbox-next { right: 4px; }
+            .frame-gallery { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+        }
+
+        .hidden { display: none !important; }
+
+        @media (max-width: 720px) {
+            .chart-grid { grid-template-columns: 1fr; }
+            .chart-canvas-wrap { height: 240px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <a class="back-link" href="/">← 返回工具箱</a>
+            <div class="title-wrap">
+                <h1>LeRobot 图像质量分析</h1>
+                <p>分析数据集视频帧的模糊度、亮度、曝光、信息熵、帧间一致性，以及关节速度-模糊度关联。</p>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <!-- 加载数据集 -->
+        <section class="panel toolbar">
+            <h2>加载数据集</h2>
+            <p>输入 LeRobot v2.1 数据集路径，系统将扫描视频文件并列出可用的相机。</p>
+            <div class="input-row">
+                <input id="dataset-path" class="path-input" type="text" placeholder="例如: /data/lerobot/my_dataset">
+                <button id="load-btn" class="primary-btn">加载</button>
+            </div>
+            <div id="load-status" class="status-line">等待加载数据集。</div>
+        </section>
+
+        <!-- 数据集概览 -->
+        <section id="dataset-summary" class="hidden">
+            <div id="summary-grid" class="summary-strip"></div>
+        </section>
+
+        <!-- 分析控制 -->
+        <section id="analyze-control" class="panel toolbar hidden">
+            <h2>分析设置</h2>
+            <p>选择要分析的相机，然后开始图像质量分析。分析过程会解码每一帧视频并计算多项质量指标。</p>
+            <div class="input-row">
+                <select id="camera-select" class="cam-select">
+                    <option value="">-- 选择相机 --</option>
+                </select>
+                <button id="analyze-btn" class="primary-btn">开始分析</button>
+            </div>
+        </section>
+
+        <!-- 进度条 -->
+        <section id="progress-section" class="hidden">
+            <div class="progress-bar-wrap">
+                <div class="progress-label">
+                    <span id="progress-title">准备中...</span>
+                    <span id="progress-percent">0%</span>
+                </div>
+                <div class="progress-bar-track">
+                    <div id="progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+                </div>
+                <div id="progress-detail" class="status-line" style="margin-top: 6px;"></div>
+            </div>
+        </section>
+
+        <!-- 分析结果 -->
+        <section id="results-section" class="hidden">
+
+            <!-- 质量概览 -->
+            <div class="section-head">
+                <h3>整体质量概览</h3>
+                <p>基于模糊度(35%)、信息熵(20%)、亮度(15%)、对比度(15%)、曝光(15%)加权计算综合评分。</p>
+            </div>
+            <div id="quality-summary" class="summary-strip"></div>
+
+            <!-- 图表区 -->
+            <div class="section-head">
+                <h3>Episode 质量分布</h3>
+                <p>每个 episode 的综合质量评分，柱状图越低表示质量越差。点击柱子可查看该 episode 的逐帧详情。</p>
+            </div>
+            <div class="chart-grid">
+                <div class="chart-card" style="grid-column: 1 / -1;">
+                    <div class="chart-canvas-wrap">
+                        <canvas id="chart-episode-quality"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section-head">
+                <h3>各指标 Episode 均值分布</h3>
+                <p>每个指标在所有 episode 上的均值对比，用于发现系统性质量问题。</p>
+            </div>
+            <div class="chart-grid" id="metric-distribution-charts"></div>
+
+            <!-- 逐帧详情 -->
+            <div class="section-head">
+                <h3>逐帧指标时间线</h3>
+                <p>选择一个 episode 查看逐帧的质量指标变化。默认显示质量最差的 episode。</p>
+            </div>
+            <div class="episode-detail-panel">
+                <div class="detail-header">
+                    <h4>Episode 详情</h4>
+                    <select id="detail-episode-select" class="detail-select"></select>
+                </div>
+                <div class="chart-grid" id="timeline-charts"></div>
+            </div>
+
+            <!-- 问题帧统计 -->
+            <div class="section-head">
+                <h3>问题帧统计</h3>
+                <p>当前 episode 中被标记为问题帧的分布与列表。判定规则见「问题帧占比」卡片的悬浮说明。</p>
+            </div>
+            <div class="chart-grid">
+                <div class="chart-card">
+                    <div class="chart-title-row"><h4>问题类型分布</h4></div>
+                    <div class="subtitle">各类问题帧的数量统计</div>
+                    <div class="chart-canvas-wrap" style="height:260px;">
+                        <canvas id="chart-problem-dist"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title-row"><h4>问题帧时间分布</h4></div>
+                    <div class="subtitle">问题帧在时间轴上的分布位置</div>
+                    <div class="chart-canvas-wrap" style="height:260px;">
+                        <canvas id="chart-problem-timeline"></canvas>
+                    </div>
+                </div>
+            </div>
+            <!-- 问题帧预览画廊 -->
+            <div id="problem-gallery-section" class="chart-card" style="margin-top:16px;">
+                <div class="chart-title-row"><h4>问题帧预览</h4></div>
+                <div class="subtitle">点击缩略图可放大查看。每次加载 20 张，可点击底部加载更多。</div>
+                <div id="problem-gallery" class="frame-gallery"></div>
+                <div id="gallery-load-more" class="hidden" style="text-align:center;padding:12px;">
+                    <button class="secondary-btn" id="gallery-more-btn">加载更多</button>
+                    <span id="gallery-counter" style="margin-left:8px;font-size:12px;color:var(--muted);"></span>
+                </div>
+            </div>
+
+            <!-- 问题帧大图弹窗 -->
+            <div id="frame-lightbox" class="lightbox hidden" onclick="closeLightbox(event)">
+                <div class="lightbox-inner">
+                    <img id="lightbox-img" src="" alt="帧预览">
+                    <div id="lightbox-info" class="lightbox-info"></div>
+                    <button class="lightbox-close" onclick="closeLightbox()">&times;</button>
+                    <button class="lightbox-nav lightbox-prev" id="lightbox-prev" onclick="navLightbox(-1)">&lsaquo;</button>
+                    <button class="lightbox-nav lightbox-next" id="lightbox-next" onclick="navLightbox(1)">&rsaquo;</button>
+                </div>
+            </div>
+
+            <div id="problem-table-section" class="chart-card" style="margin-top:16px;">
+                <div id="problem-table-container"></div>
+            </div>
+
+            <!-- 关节速度-模糊度关联 -->
+            <div id="velocity-blur-section" class="hidden">
+                <div class="section-head">
+                    <h3>关节速度-模糊度关联</h3>
+                    <p>散点图展示关节最大绝对速度与对应帧模糊度（Laplacian方差）的关系。负相关说明高速运动时图像更模糊。</p>
+                </div>
+                <div id="velocity-blur-info" class="correlation-info"></div>
+                <div class="chart-card">
+                    <div class="chart-canvas-wrap tall">
+                        <canvas id="chart-velocity-blur"></canvas>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='image_analysis_app.js') }}"></script>
+</body>
+</html>
