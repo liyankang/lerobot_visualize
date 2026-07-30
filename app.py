@@ -2641,7 +2641,7 @@ class DatasetEditor:
             "max":  arr.max(0).tolist(),
             "mean": arr.mean(0).tolist(),
             "std":  arr.std(0).tolist(),
-            "count": [int(arr.shape[0])],
+            "count": int(arr.shape[0]),
         }
         for q in DatasetEditor.QUANTILES:
             stats[f"q{int(q * 100):02d}"] = np.quantile(arr, q, axis=0).tolist()
@@ -2798,7 +2798,7 @@ class DatasetEditor:
             "max": to_image_stat_list(max_channels),
             "mean": to_image_stat_list(mean_channels),
             "std": to_image_stat_list(std_channels),
-            "count": [int(decoded_frames)],
+            "count": int(decoded_frames),
         }
         for q in self.QUANTILES:
             stats[f"q{int(q * 100):02d}"] = to_image_stat_list(
@@ -2900,7 +2900,10 @@ class DatasetEditor:
             maxs = np.array([s["max"] for s in stats_list], dtype=np.float64)
             means = np.array([s["mean"] for s in stats_list], dtype=np.float64)
             stds = np.array([s["std"] for s in stats_list], dtype=np.float64)
-            counts = np.array([s["count"][0] for s in stats_list], dtype=np.float64)
+            counts = np.array([
+                s["count"][0] if isinstance(s.get("count"), list) else s["count"]
+                for s in stats_list
+            ], dtype=np.float64)
             total_count = counts.sum()
             count_weights = counts.reshape((len(counts),) + (1,) * (means.ndim - 1))
             total_mean = (means * count_weights).sum(0) / total_count
@@ -2914,7 +2917,7 @@ class DatasetEditor:
                 "max":  maxs.max(0).tolist(),
                 "mean": total_mean.tolist(),
                 "std":  total_std.tolist(),
-                "count": [int(total_count)],
+                "count": int(total_count),
             }
 
             for metric in stats_list[0]:
@@ -3693,6 +3696,39 @@ def api_batch_tools_preview():
         return jsonify({"success": True, "plan": plan})
     except Exception as e:
         log.exception("批处理预览失败")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/batch_tools/episode_curve", methods=["POST"])
+def api_batch_tools_episode_curve():
+    data = request.get_json() or {}
+    try:
+        ep_idx = int(data.get("episode_index"))
+        editor, plan = _build_batch_editor_and_plan(data, include_curves=False)
+        trim_row = None
+        for row in plan.get("static_trims", []):
+            if int(row.get("episode_index")) == ep_idx:
+                trim_row = row
+                break
+        length_row = None
+        for row in plan.get("length_deletions", []):
+            if int(row.get("episode_index")) == ep_idx:
+                length_row = row
+                break
+        reason = "static edge trim"
+        if length_row:
+            reason = "IQR length deletion"
+        curve = batch_tools.build_episode_curve_preview(
+            editor,
+            ep_idx,
+            trim_row=trim_row,
+            reason=reason,
+            max_points=opt_int_from_data(data, "max_curve_points", 260),
+            max_dims=opt_int_from_data(data, "max_curve_dims", 8),
+        )
+        return jsonify({"success": True, "curve": curve})
+    except Exception as e:
+        log.exception("加载 episode 曲线失败")
         return jsonify({"error": str(e)}), 400
 
 

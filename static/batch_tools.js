@@ -3,6 +3,7 @@ let currentAffected = [];
 let currentCurves = new Map();
 let progressTimer = null;
 let browseTarget = null;
+let lastPreviewPayload = null;
 
 function readNumber(id) {
     const v = $(id).value.trim();
@@ -225,7 +226,7 @@ function renderEpisodeSelector(plan) {
     renderSelectedEpisode();
 }
 
-function renderSelectedEpisode() {
+async function renderSelectedEpisode() {
     const ep = Number($('episode-select').value);
     const item = currentAffected.find(x => x.episode_index === ep);
     if (!item) return;
@@ -239,9 +240,19 @@ function renderSelectedEpisode() {
     ].join('');
     const curve = currentCurves.get(ep);
     if (!curve) {
-        $('curve-panel').innerHTML = '<div class="empty">此 episode 没有曲线数据</div>';
-        return;
+        $('curve-panel').innerHTML = '<div class="empty">正在加载此 episode 的曲线...</div>';
+        await loadEpisodeCurve(ep);
+        const loaded = currentCurves.get(ep);
+        if (!loaded) {
+            $('curve-panel').innerHTML = '<div class="empty">此 episode 没有 action/state 曲线数据</div>';
+            return;
+        }
+        return renderCurvePanel(item, loaded);
     }
+    renderCurvePanel(item, curve);
+}
+
+function renderCurvePanel(item, curve) {
     const legend = (curve.names || []).slice(0, curve.dim_count || 0).map((name, i) =>
         `<span><span class="legend-dot" style="background:${COLORS[i % COLORS.length]}"></span>${esc(name)}</span>`
     ).join('');
@@ -259,11 +270,27 @@ function infoChip(value, label) {
     return `<div class="info-chip"><b>${esc(value)}</b>${esc(label)}</div>`;
 }
 
+async function loadEpisodeCurve(ep) {
+    if (!lastPreviewPayload) return;
+    try {
+        const data = await post('/api/batch_tools/episode_curve', {
+            ...lastPreviewPayload,
+            episode_index: ep,
+            max_curve_points: 260,
+            max_curve_dims: 8,
+        });
+        if (data.curve) currentCurves.set(Number(ep), data.curve);
+    } catch (e) {
+        status(`加载 Episode ${ep} 曲线失败: ${e.message}`, 'error');
+    }
+}
+
 async function preview() {
     status('正在生成预览...');
     setBusy(true);
     try {
-        const data = await post('/api/batch_tools/preview', payload());
+        lastPreviewPayload = payload();
+        const data = await post('/api/batch_tools/preview', lastPreviewPayload);
         renderPlan(data.plan);
         status('预览完成', 'ok');
     } catch (e) {
