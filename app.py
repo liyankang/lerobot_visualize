@@ -2829,10 +2829,13 @@ class DatasetEditor:
         ]
         total_episodes = len(valid_episodes)
         if progress_cb:
+            detail = "正在汇总每个 episode 的数值统计..."
+            if not skip_video_stats:
+                detail = "正在汇总每个 episode 的数值与图像统计..."
             progress_cb(
                 "compute_stats",
                 "正在计算统计信息",
-                "正在汇总每个 episode 的数值与图像统计...",
+                detail,
                 0,
                 total_episodes,
             )
@@ -3164,7 +3167,10 @@ class DatasetEditor:
                 log.warning(f"{failed} 个视频重编码失败, 已回退复制原始文件")
 
         # ── stats.json + episodes_stats.jsonl ──
-        report("compute_stats", "正在计算统计信息", "正在重算全局与 episode 级统计...", 0, len(save_jobs))
+        stats_detail = "正在重算 state/action 等数值统计..."
+        if not skip_video_stats:
+            stats_detail = "正在重算 state/action 与图像/视频统计..."
+        report("compute_stats", "正在计算统计信息", stats_detail, 0, len(save_jobs))
         original_state = {
             "episodes_meta": self.episodes_meta,
             "episode_data": self.episode_data,
@@ -3658,6 +3664,20 @@ def _build_batch_editor_and_plan(data, include_curves=False):
     return editor, plan
 
 
+def _read_saved_stats_keys(output_path):
+    stats_path = Path(output_path) / "meta" / "stats.json"
+    if not stats_path.exists():
+        return []
+    try:
+        with open(stats_path, "r") as f:
+            stats = json.load(f)
+        if isinstance(stats, dict):
+            return sorted(str(k) for k in stats.keys())
+    except Exception:
+        log.warning(f"读取 stats keys 失败: {stats_path}", exc_info=True)
+    return []
+
+
 def opt_int_from_data(data, name, default):
     val = data.get(name, default)
     if val in ("", None):
@@ -3691,18 +3711,25 @@ def api_batch_tools_run():
         editor, plan = _build_batch_editor_and_plan(data, include_curves=False)
         if plan["keep_episodes"] <= 0 and not data.get("allow_empty", False):
             return jsonify({"error": "当前设置会删除全部 episode；如确实需要，请勾选允许删空"}), 400
+        set_save_progress("prepare", "正在准备批量裁剪", "正在应用批处理计划...", 0, 1, True)
         result = batch_tools.apply_batch_plan(editor, plan)
         editor.save_as(
             str(out_path),
+            set_save_progress,
             skip_video_stats=bool(data.get("skip_video_stats", False)),
         )
+        stats_keys = _read_saved_stats_keys(out_path)
+        set_save_progress("done", "保存完成", f"数据集已保存到: {out_path}", 1, 1, False)
         return jsonify({
             "success": True,
             "path": str(out_path),
             "plan": plan,
             "result": result,
+            "stats_keys": stats_keys,
+            "skip_video_stats": bool(data.get("skip_video_stats", False)),
         })
     except Exception as e:
+        set_save_progress("error", "批处理执行失败", str(e), 0, 0, False)
         log.exception("批处理执行失败")
         return jsonify({"error": str(e)}), 500
 
