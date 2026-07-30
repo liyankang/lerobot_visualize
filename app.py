@@ -2806,7 +2806,8 @@ class DatasetEditor:
             )
         return stats
 
-    def compute_episode_stats(self, video_paths_by_episode=None, progress_cb=None):
+    def compute_episode_stats(self, video_paths_by_episode=None, progress_cb=None,
+                              skip_video_stats=False):
         """计算每个 episode 的统计数据 (lerobot v2.1 格式)"""
         features = self.info.get("features", {})
         vector_cols = [c for c in ("observation.state", "action")
@@ -2814,10 +2815,12 @@ class DatasetEditor:
         scalar_cols = [c for c in ("timestamp", "frame_index", "episode_index",
                                     "index", "task_index")
                        if any(c in df.columns for df in self.episode_data.values())]
-        image_cols = [
-            key for key, meta in features.items()
-            if meta.get("dtype") in ("image", "video")
-        ]
+        image_cols = []
+        if not skip_video_stats:
+            image_cols = [
+                key for key, meta in features.items()
+                if meta.get("dtype") in ("image", "video")
+            ]
 
         results = []
         valid_episodes = [
@@ -2856,7 +2859,7 @@ class DatasetEditor:
                 if len(arr) > 0:
                     stats[col] = self._compute_feature_stats(arr)
 
-            if video_paths_by_episode:
+            if video_paths_by_episode and not skip_video_stats:
                 ep_video_paths = video_paths_by_episode.get(idx, {})
                 for key in image_cols:
                     video_path = ep_video_paths.get(key)
@@ -2878,9 +2881,11 @@ class DatasetEditor:
                 )
         return results
 
-    def compute_stats(self, video_paths_by_episode=None, progress_cb=None):
+    def compute_stats(self, video_paths_by_episode=None, progress_cb=None,
+                      skip_video_stats=False):
         """基于 episode stats 聚合全局统计 (lerobot aggregate_stats 公式)"""
-        ep_stats_list = self.compute_episode_stats(video_paths_by_episode, progress_cb)
+        ep_stats_list = self.compute_episode_stats(
+            video_paths_by_episode, progress_cb, skip_video_stats=skip_video_stats)
         all_keys = {}
         for es in ep_stats_list:
             for k in es["stats"]:
@@ -2922,7 +2927,8 @@ class DatasetEditor:
 
     # ─── 保存 ───
 
-    def save_as(self, output_path: str, progress_cb=None, append_paths=None):
+    def save_as(self, output_path: str, progress_cb=None, append_paths=None,
+                skip_video_stats=False):
         """另存为新数据集 (含重算的统计元数据，可在尾部拼接额外数据集)"""
         out = Path(output_path).resolve()
 
@@ -3189,7 +3195,9 @@ class DatasetEditor:
             self.tasks = merged_tasks
             self.info = merged_info
 
-            global_stats, ep_stats = self.compute_stats(saved_video_paths, report)
+            stats_video_paths = None if skip_video_stats else saved_video_paths
+            global_stats, ep_stats = self.compute_stats(
+                stats_video_paths, report, skip_video_stats=skip_video_stats)
             with open(meta_dir / "stats.json", "w") as f:
                 json.dump(global_stats, f, indent=2, ensure_ascii=False)
             with open(meta_dir / "episodes_stats.jsonl", "w") as f:
@@ -3581,6 +3589,7 @@ def api_save():
     data = request.get_json() or {}
     output = data.get("output_path", "").strip()
     append_paths = data.get("append_paths") or []
+    skip_video_stats = bool(data.get("skip_video_stats", False))
     if not output:
         return jsonify({"error": "请指定保存路径"}), 400
     if not isinstance(append_paths, list):
@@ -3588,7 +3597,12 @@ def api_save():
 
     try:
         set_save_progress("prepare", "正在准备保存", "正在初始化保存任务...", 0, 1, True)
-        _editor.save_as(output, set_save_progress, append_paths=append_paths)
+        _editor.save_as(
+            output,
+            set_save_progress,
+            append_paths=append_paths,
+            skip_video_stats=skip_video_stats,
+        )
         set_save_progress("done", "保存完成", f"数据集已保存到: {output}", 1, 1, False)
         return jsonify({"success": True, "path": output})
     except Exception as e:
@@ -3611,8 +3625,8 @@ def _batch_options_from_request(data):
         return float(val)
 
     return {
-        "min_length": opt_int("min_length"),
-        "max_length": opt_int("max_length"),
+        "auto_length_iqr": bool(data.get("auto_length_iqr", False)),
+        "iqr_multiplier": opt_float("iqr_multiplier", 1.5),
         "trim_static_edges": bool(data.get("trim_static_edges", False)),
         "motion_threshold": opt_float("motion_threshold", 1e-4),
         "margin_frames": opt_int("margin_frames", 0),
@@ -3622,26 +3636,40 @@ def _batch_options_from_request(data):
     }
 
 
-def _build_batch_editor_and_plan(data):
+def _build_batch_editor_and_plan(data, include_curves=False):
     input_path = str(data.get("input_path", "")).strip()
     if not input_path:
         raise ValueError("请指定输入数据集路径")
     opts = _batch_options_from_request(data)
     if (
-        opts["min_length"] is None
-        and opts["max_length"] is None
+        not opts["auto_length_iqr"]
         and not opts["trim_static_edges"]
     ):
-        raise ValueError("至少需要指定长度阈值或启用静止段裁剪")
+        raise ValueError("至少需要启用 IQR 长度自动删除或静止段裁剪")
     editor = DatasetEditor(input_path)
-    plan = batch_tools.build_batch_plan(editor, **opts)
+    plan = batch_tools.build_batch_plan(
+        editor,
+        **opts,
+        include_curves=include_curves,
+        max_curve_episodes=opt_int_from_data(data, "max_curve_episodes", 80),
+        max_curve_points=opt_int_from_data(data, "max_curve_points", 260),
+        max_curve_dims=opt_int_from_data(data, "max_curve_dims", 8),
+    )
     return editor, plan
+
+
+def opt_int_from_data(data, name, default):
+    val = data.get(name, default)
+    if val in ("", None):
+        return default
+    return int(val)
 
 
 @app.route("/api/batch_tools/preview", methods=["POST"])
 def api_batch_tools_preview():
     try:
-        _editor_local, plan = _build_batch_editor_and_plan(request.get_json() or {})
+        _editor_local, plan = _build_batch_editor_and_plan(
+            request.get_json() or {}, include_curves=True)
         return jsonify({"success": True, "plan": plan})
     except Exception as e:
         log.exception("批处理预览失败")
@@ -3660,11 +3688,14 @@ def api_batch_tools_run():
         if input_path == out_path:
             return jsonify({"error": "输出路径不能和输入路径相同，请另存为新目录"}), 400
 
-        editor, plan = _build_batch_editor_and_plan(data)
+        editor, plan = _build_batch_editor_and_plan(data, include_curves=False)
         if plan["keep_episodes"] <= 0 and not data.get("allow_empty", False):
             return jsonify({"error": "当前设置会删除全部 episode；如确实需要，请勾选允许删空"}), 400
         result = batch_tools.apply_batch_plan(editor, plan)
-        editor.save_as(str(out_path))
+        editor.save_as(
+            str(out_path),
+            skip_video_stats=bool(data.get("skip_video_stats", False)),
+        )
         return jsonify({
             "success": True,
             "path": str(out_path),

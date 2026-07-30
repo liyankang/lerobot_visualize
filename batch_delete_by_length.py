@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-按 episode 长度批量过滤 LeRobot 数据集。
+按 episode 长度和静止边界批量过滤 LeRobot 数据集。
 
 示例:
-    python batch_delete_by_length.py --input /path/to/dataset --output /path/to/filtered --min-length 50
-    python batch_delete_by_length.py --input /path/to/dataset --output /path/to/filtered --max-length 300
-    python batch_delete_by_length.py --input /path/to/dataset --output /path/to/filtered --min-length 50 --max-length 300
-    python batch_delete_by_length.py --input /path/to/dataset --min-length 50 --dry-run
+    python batch_delete_by_length.py --input /path/to/dataset --output /path/to/filtered --auto-length-iqr
+    python batch_delete_by_length.py --input /path/to/dataset --output /path/to/filtered --auto-length-iqr --trim-static-edges
+    python batch_delete_by_length.py --input /path/to/dataset --auto-length-iqr --dry-run
 """
 
 from __future__ import annotations
@@ -68,21 +67,20 @@ def _print_trim_rows(title, rows, limit):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="按 episode 帧数批量删除过短或过长的 LeRobot 数据集 episode，并另存为新数据集。"
+        description="按 IQR 自动删除过短/过长 episode，并可裁剪开头/结尾静止帧。"
     )
     parser.add_argument("--input", "-i", required=True, help="输入 LeRobot 数据集目录")
     parser.add_argument("--output", "-o", help="输出数据集目录；非 dry-run 时必填")
     parser.add_argument(
-        "--min-length",
-        type=int,
-        default=None,
-        help="删除短于该帧数的 episode",
+        "--auto-length-iqr",
+        action="store_true",
+        help="用 episode 长度的 IQR 自动删除过短/过长 episode",
     )
     parser.add_argument(
-        "--max-length",
-        type=int,
-        default=None,
-        help="删除长于该帧数的 episode",
+        "--iqr-multiplier",
+        type=float,
+        default=1.5,
+        help="IQR 异常值倍数，边界为 Q1-k*IQR / Q3+k*IQR，默认 1.5",
     )
     parser.add_argument(
         "--dry-run",
@@ -93,6 +91,12 @@ def parse_args() -> argparse.Namespace:
         "--allow-empty",
         action="store_true",
         help="允许输出 0 个 episode 的数据集；默认会阻止删空",
+    )
+    parser.add_argument(
+        "--skip-video-stats",
+        "--skip-video",
+        action="store_true",
+        help="保存时跳过 image/video 的视频帧统计，只计算 state/action 等数值统计",
     )
     parser.add_argument(
         "--trim-static-edges",
@@ -141,27 +145,16 @@ def main() -> int:
     args = parse_args()
 
     if (
-        args.min_length is None
-        and args.max_length is None
+        not args.auto_length_iqr
         and not args.trim_static_edges
     ):
         print(
-            "错误: 至少需要指定 --min-length、--max-length 或 --trim-static-edges",
+            "错误: 至少需要指定 --auto-length-iqr 或 --trim-static-edges",
             file=sys.stderr,
         )
         return 2
-    if args.min_length is not None and args.min_length < 0:
-        print("错误: --min-length 不能小于 0", file=sys.stderr)
-        return 2
-    if args.max_length is not None and args.max_length < 0:
-        print("错误: --max-length 不能小于 0", file=sys.stderr)
-        return 2
-    if (
-        args.min_length is not None
-        and args.max_length is not None
-        and args.min_length > args.max_length
-    ):
-        print("错误: --min-length 不能大于 --max-length", file=sys.stderr)
+    if args.iqr_multiplier < 0:
+        print("错误: --iqr-multiplier 不能小于 0", file=sys.stderr)
         return 2
     if not args.dry_run and not args.output:
         print("错误: 非 dry-run 模式必须指定 --output", file=sys.stderr)
@@ -176,8 +169,8 @@ def main() -> int:
     joint_indices = batch_tools.parse_joint_indices(args.joint_indices)
     plan = batch_tools.build_batch_plan(
         editor,
-        min_length=args.min_length,
-        max_length=args.max_length,
+        auto_length_iqr=args.auto_length_iqr,
+        iqr_multiplier=args.iqr_multiplier,
         trim_static_edges=args.trim_static_edges,
         motion_threshold=args.motion_threshold,
         margin_frames=args.margin_frames,
@@ -188,10 +181,12 @@ def main() -> int:
 
     print(f"输入数据集: {input_path}")
     print(f"episode 总数: {plan['total_episodes']}, frame 总数: {plan['total_frames']}")
-    if args.min_length is not None:
-        print(f"最小长度阈值: {args.min_length}")
-    if args.max_length is not None:
-        print(f"最大长度阈值: {args.max_length}")
+    if args.auto_length_iqr:
+        iqr = plan["length_iqr"]
+        print(
+            "IQR 长度边界: Q1={q1:.2f}, Q3={q3:.2f}, IQR={iqr:.2f}, "
+            "lower={lower:.2f}, upper={upper:.2f}, k={multiplier:.2f}".format(**iqr)
+        )
     if args.trim_static_edges:
         print(f"静止段裁剪阈值: {args.motion_threshold}")
         print(f"边界保留帧: {args.margin_frames}")
@@ -230,7 +225,7 @@ def main() -> int:
         print("没有 episode 命中删除条件，仍会按原样另存为新数据集。")
 
     batch_tools.apply_batch_plan(editor, plan)
-    editor.save_as(str(output_path))
+    editor.save_as(str(output_path), skip_video_stats=args.skip_video_stats)
     print(f"已保存到: {output_path}")
     return 0
 

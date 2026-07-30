@@ -61,6 +61,28 @@
         .metric .num { font-size: 22px; font-weight: 750; color: #17202a; }
         .metric .label { font-size: 12px; color: #60717f; margin-top: 4px; }
         .tables { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .curves { margin-top: 18px; }
+        .curve-list { display: grid; grid-template-columns: 1fr; gap: 12px; }
+        .curve-card {
+            border: 1px solid #e2e7ec; border-radius: 8px; background: #fff;
+            padding: 10px;
+        }
+        .curve-head {
+            display: flex; justify-content: space-between; gap: 10px;
+            font-size: 12px; color: #52616d; margin-bottom: 8px;
+        }
+        .curve-head b { color: #263238; }
+        .curve-svg {
+            width: 100%; height: 170px; display: block; background: #fbfcfd;
+            border: 1px solid #edf1f4; border-radius: 6px;
+        }
+        .curve-legend {
+            display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;
+            font-size: 11px; color: #52616d;
+        }
+        .legend-dot {
+            width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 4px;
+        }
         table { width: 100%; border-collapse: collapse; font-size: 12px; }
         th, td { border-bottom: 1px solid #edf1f4; padding: 8px 6px; text-align: left; }
         th { color: #52616d; font-weight: 700; background: #fafbfc; }
@@ -99,15 +121,13 @@
             </div>
 
             <div class="group">
-                <div class="split">
-                    <div class="field">
-                        <label for="min-length">删除短于帧数</label>
-                        <input id="min-length" type="number" min="0" placeholder="可空">
-                    </div>
-                    <div class="field">
-                        <label for="max-length">删除长于帧数</label>
-                        <input id="max-length" type="number" min="0" placeholder="可空">
-                    </div>
+                <label class="check">
+                    <input id="auto-length-iqr" type="checkbox" checked>
+                    用 IQR 自动删除过短和过长 episode
+                </label>
+                <div class="field">
+                    <label for="iqr-multiplier">IQR 倍数</label>
+                    <input id="iqr-multiplier" type="number" min="0" step="0.1" value="1.5">
                 </div>
             </div>
 
@@ -147,6 +167,10 @@
                     <input id="allow-empty" type="checkbox">
                     允许输出 0 个 episode
                 </label>
+                <label class="check">
+                    <input id="skip-video-stats" type="checkbox">
+                    保存时跳过视频统计
+                </label>
             </div>
 
             <div class="actions">
@@ -167,6 +191,12 @@
                 <div>
                     <h2>静止段裁剪</h2>
                     <div id="trim-table" class="empty">尚未预览</div>
+                </div>
+            </div>
+            <div class="curves">
+                <h2>动作曲线预览</h2>
+                <div id="curve-list" class="curve-list">
+                    <div class="empty">尚未预览</div>
                 </div>
             </div>
         </section>
