@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>批量数据裁剪 - LeRobot 工具箱</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f4f6f8; color: #263238; min-height: 100vh;
+        }
+        header {
+            height: 52px; background: #17202a; color: #eef3f7;
+            display: flex; align-items: center; gap: 16px; padding: 0 22px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.22);
+        }
+        header a { color: #b8c4ce; text-decoration: none; font-size: 13px; }
+        header a:hover { color: #fff; }
+        header h1 { font-size: 16px; font-weight: 650; }
+        main {
+            max-width: 1180px; margin: 0 auto; padding: 22px;
+            display: grid; grid-template-columns: 420px 1fr; gap: 18px;
+        }
+        section {
+            background: #fff; border: 1px solid #e2e7ec; border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(20,40,60,0.05);
+        }
+        .form { padding: 18px; }
+        .form h2, .result h2 { font-size: 15px; margin-bottom: 14px; }
+        .group { border-top: 1px solid #edf1f4; padding-top: 14px; margin-top: 14px; }
+        .group:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+        label { display: block; font-size: 12px; font-weight: 650; color: #52616d; margin-bottom: 6px; }
+        input[type="text"], input[type="number"], select {
+            width: 100%; height: 34px; padding: 7px 10px; border: 1px solid #cfd8df;
+            border-radius: 6px; font-size: 13px; color: #263238; background: #fff;
+        }
+        input:focus, select:focus { outline: none; border-color: #1f7aec; box-shadow: 0 0 0 2px rgba(31,122,236,0.12); }
+        .field { margin-bottom: 12px; }
+        .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .check {
+            display: flex; align-items: center; gap: 8px; margin: 4px 0 12px;
+            font-size: 13px; color: #37474f;
+        }
+        .check input { width: 16px; height: 16px; }
+        .actions { display: flex; gap: 10px; margin-top: 16px; }
+        button {
+            height: 34px; padding: 0 14px; border: 0; border-radius: 6px;
+            font-size: 13px; font-weight: 650; cursor: pointer;
+        }
+        .primary { background: #1f7aec; color: #fff; }
+        .secondary { background: #e8edf2; color: #263238; }
+        button:disabled { opacity: 0.55; cursor: not-allowed; }
+        .result { padding: 18px; min-height: 540px; }
+        .summary {
+            display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px;
+        }
+        .metric {
+            border: 1px solid #e2e7ec; border-radius: 8px; padding: 12px; background: #fafbfc;
+        }
+        .metric .num { font-size: 22px; font-weight: 750; color: #17202a; }
+        .metric .label { font-size: 12px; color: #60717f; margin-top: 4px; }
+        .tables { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th, td { border-bottom: 1px solid #edf1f4; padding: 8px 6px; text-align: left; }
+        th { color: #52616d; font-weight: 700; background: #fafbfc; }
+        .empty { color: #78909c; font-size: 13px; padding: 18px 0; }
+        .status {
+            margin-top: 14px; padding: 10px 12px; border-radius: 6px;
+            background: #eef6ff; color: #145ea8; font-size: 13px; display: none;
+        }
+        .status.error { background: #fff1f0; color: #b42318; }
+        .status.ok { background: #ecfdf3; color: #067647; }
+        @media (max-width: 940px) {
+            main { grid-template-columns: 1fr; padding: 14px; }
+            .summary { grid-template-columns: repeat(2, 1fr); }
+            .tables { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <a href="/">← 工具箱</a>
+        <h1>批量数据裁剪</h1>
+    </header>
+
+    <main>
+        <section class="form">
+            <h2>批处理设置</h2>
+            <div class="group">
+                <div class="field">
+                    <label for="input-path">输入数据集路径</label>
+                    <input id="input-path" type="text" placeholder="D:\path\dataset">
+                </div>
+                <div class="field">
+                    <label for="output-path">输出数据集路径</label>
+                    <input id="output-path" type="text" placeholder="D:\path\dataset_filtered">
+                </div>
+            </div>
+
+            <div class="group">
+                <div class="split">
+                    <div class="field">
+                        <label for="min-length">删除短于帧数</label>
+                        <input id="min-length" type="number" min="0" placeholder="可空">
+                    </div>
+                    <div class="field">
+                        <label for="max-length">删除长于帧数</label>
+                        <input id="max-length" type="number" min="0" placeholder="可空">
+                    </div>
+                </div>
+            </div>
+
+            <div class="group">
+                <label class="check">
+                    <input id="trim-static" type="checkbox">
+                    裁掉开头和结尾静止帧
+                </label>
+                <div class="split">
+                    <div class="field">
+                        <label for="motion-threshold">静止阈值</label>
+                        <input id="motion-threshold" type="number" step="0.00001" value="0.0001">
+                    </div>
+                    <div class="field">
+                        <label for="motion-metric">运动量</label>
+                        <select id="motion-metric">
+                            <option value="max_abs">max_abs</option>
+                            <option value="norm">norm</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="split">
+                    <div class="field">
+                        <label for="margin-frames">边界额外保留帧</label>
+                        <input id="margin-frames" type="number" min="0" value="0">
+                    </div>
+                    <div class="field">
+                        <label for="min-static-frames">最小静止段帧数</label>
+                        <input id="min-static-frames" type="number" min="1" value="1">
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="joint-indices">只用指定 state 维度判断静止</label>
+                    <input id="joint-indices" type="text" placeholder="例如 0,1,2；留空使用全部维度">
+                </div>
+                <label class="check">
+                    <input id="allow-empty" type="checkbox">
+                    允许输出 0 个 episode
+                </label>
+            </div>
+
+            <div class="actions">
+                <button class="secondary" id="preview-btn">预览</button>
+                <button class="primary" id="run-btn">执行并保存</button>
+            </div>
+            <div id="status" class="status"></div>
+        </section>
+
+        <section class="result">
+            <h2>预览结果</h2>
+            <div id="summary" class="summary"></div>
+            <div class="tables">
+                <div>
+                    <h2>按长度删除</h2>
+                    <div id="length-table" class="empty">尚未预览</div>
+                </div>
+                <div>
+                    <h2>静止段裁剪</h2>
+                    <div id="trim-table" class="empty">尚未预览</div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/batch_tools.js"></script>
+</body>
+</html>

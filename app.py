@@ -38,6 +38,7 @@ except ImportError:
     _HAS_SCIPY = False
 
 import image_analyzer as img_analyzer
+import dataset_batch_tools as batch_tools
 
 # ═══════════════════════ 配置 ═══════════════════════
 
@@ -3236,6 +3237,11 @@ def converter_page():
     return render_template("converter.html")
 
 
+@app.route("/batch-tools")
+def batch_tools_page():
+    return render_template("batch_tools.html")
+
+
 @app.route("/image-analysis")
 def image_analysis_page():
     return render_template("image_analysis.html")
@@ -3588,6 +3594,85 @@ def api_save():
     except Exception as e:
         set_save_progress("error", "保存失败", str(e), 0, 0, False)
         log.exception("保存失败")
+        return jsonify({"error": str(e)}), 500
+
+
+def _batch_options_from_request(data):
+    def opt_int(name, default=None):
+        val = data.get(name, default)
+        if val in ("", None):
+            return default
+        return int(val)
+
+    def opt_float(name, default):
+        val = data.get(name, default)
+        if val in ("", None):
+            return default
+        return float(val)
+
+    return {
+        "min_length": opt_int("min_length"),
+        "max_length": opt_int("max_length"),
+        "trim_static_edges": bool(data.get("trim_static_edges", False)),
+        "motion_threshold": opt_float("motion_threshold", 1e-4),
+        "margin_frames": opt_int("margin_frames", 0),
+        "min_static_frames": opt_int("min_static_frames", 1),
+        "joint_indices": batch_tools.parse_joint_indices(data.get("joint_indices")),
+        "motion_metric": data.get("motion_metric") or "max_abs",
+    }
+
+
+def _build_batch_editor_and_plan(data):
+    input_path = str(data.get("input_path", "")).strip()
+    if not input_path:
+        raise ValueError("请指定输入数据集路径")
+    opts = _batch_options_from_request(data)
+    if (
+        opts["min_length"] is None
+        and opts["max_length"] is None
+        and not opts["trim_static_edges"]
+    ):
+        raise ValueError("至少需要指定长度阈值或启用静止段裁剪")
+    editor = DatasetEditor(input_path)
+    plan = batch_tools.build_batch_plan(editor, **opts)
+    return editor, plan
+
+
+@app.route("/api/batch_tools/preview", methods=["POST"])
+def api_batch_tools_preview():
+    try:
+        _editor_local, plan = _build_batch_editor_and_plan(request.get_json() or {})
+        return jsonify({"success": True, "plan": plan})
+    except Exception as e:
+        log.exception("批处理预览失败")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/batch_tools/run", methods=["POST"])
+def api_batch_tools_run():
+    data = request.get_json() or {}
+    output_path = str(data.get("output_path", "")).strip()
+    if not output_path:
+        return jsonify({"error": "请指定输出数据集路径"}), 400
+    try:
+        input_path = Path(str(data.get("input_path", "")).strip()).resolve()
+        out_path = Path(output_path).resolve()
+        if input_path == out_path:
+            return jsonify({"error": "输出路径不能和输入路径相同，请另存为新目录"}), 400
+
+        editor, plan = _build_batch_editor_and_plan(data)
+        if plan["keep_episodes"] <= 0 and not data.get("allow_empty", False):
+            return jsonify({"error": "当前设置会删除全部 episode；如确实需要，请勾选允许删空"}), 400
+        result = batch_tools.apply_batch_plan(editor, plan)
+        editor.save_as(str(out_path))
+        return jsonify({
+            "success": True,
+            "path": str(out_path),
+            "plan": plan,
+            "result": result,
+        })
+    except Exception as e:
+        log.exception("批处理执行失败")
         return jsonify({"error": str(e)}), 500
 
 
