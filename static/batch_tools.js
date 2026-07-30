@@ -89,25 +89,58 @@ async function post(url, body) {
     return data;
 }
 
-function metric(num, label) {
-    return `<div class="metric"><div class="num">${num}</div><div class="label">${label}</div></div>`;
+function fmtInt(v) {
+    if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
+    return Number(v).toLocaleString('en-US');
+}
+
+function fmtFixed(v, digits = 1) {
+    if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
+    return Number(v).toFixed(digits);
+}
+
+function summaryItem(num, label, cls = '') {
+    return `<div class="summary-item ${cls}">
+        <div class="num">${esc(num)}</div>
+        <div class="label">${esc(label)}</div>
+    </div>`;
 }
 
 function renderSummary(plan) {
     const iqr = plan.length_iqr || {};
     const iqrText = iqr.enabled && iqr.lower !== null
-        ? `${Number(iqr.lower).toFixed(1)}~${Number(iqr.upper).toFixed(1)}`
-        : 'off';
-    $('summary').innerHTML = [
-        metric(plan.total_episodes, '原始 episodes'),
-        metric(plan.total_frames, '原始 frames'),
-        metric(plan.delete_episode_count, '按长度删除 episodes'),
-        metric(plan.trim_frame_count, '静止段裁剪 frames'),
-        metric(plan.keep_episodes, '保留 episodes'),
-        metric(plan.keep_frames, '保留 frames'),
-        metric(plan.delete_episode_frames, '按长度删除 frames'),
-        metric(iqrText, 'IQR 保留区间'),
-    ].join('');
+        ? `${fmtFixed(iqr.lower)} - ${fmtFixed(iqr.upper)}`
+        : '未启用';
+    const keepRatio = plan.total_frames
+        ? `${fmtFixed((plan.keep_frames / plan.total_frames) * 100, 1)}%`
+        : '-';
+    $('summary').innerHTML = `
+        <div class="summary-card">
+            <h3>数据规模</h3>
+            <div class="summary-pair">
+                ${summaryItem(fmtInt(plan.total_episodes), '原始 episodes')}
+                ${summaryItem(fmtInt(plan.total_frames), '原始 frames')}
+                ${summaryItem(fmtInt(plan.keep_episodes), '保留 episodes', 'ok')}
+                ${summaryItem(fmtInt(plan.keep_frames), `保留 frames · ${keepRatio}`, 'ok')}
+            </div>
+        </div>
+        <div class="summary-card">
+            <h3>处理影响</h3>
+            <div class="summary-pair">
+                ${summaryItem(fmtInt(plan.delete_episode_count), 'IQR 删除 episodes', 'warn')}
+                ${summaryItem(fmtInt(plan.delete_episode_frames), 'IQR 删除 frames', 'warn')}
+                ${summaryItem(fmtInt(plan.static_trims.length), '裁剪静止段 episodes', 'primary')}
+                ${summaryItem(fmtInt(plan.trim_frame_count), '裁剪静止段 frames', 'primary')}
+            </div>
+        </div>
+        <div class="summary-card">
+            <h3>IQR 长度保留区间</h3>
+            <div class="iqr-range">${esc(iqrText)}</div>
+            <div class="iqr-sub">
+                Q1 ${esc(fmtFixed(iqr.q1))} · Q3 ${esc(fmtFixed(iqr.q3))}<br>
+                IQR ${esc(fmtFixed(iqr.iqr))} · k ${esc(fmtFixed(iqr.multiplier, 2))}
+            </div>
+        </div>`;
 }
 
 function renderPlan(plan) {
