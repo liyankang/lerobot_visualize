@@ -270,7 +270,7 @@ def _stack_parquet_column(values: list) -> np.ndarray:
 
 
 def _compute_scalar_feature_stats(values: list) -> dict | None:
-    """对非 image/video feature 计算 mean/std/min/max/count, 维度按 feature 原生 shape。"""
+    """对非 image/video feature 计算 mean/std/min/max/count/quantiles。"""
     arr = _stack_parquet_column(values)
     if arr.size == 0:
         return None
@@ -280,29 +280,18 @@ def _compute_scalar_feature_stats(values: list) -> dict | None:
     arr = arr.astype(np.float64, copy=False)
     count = arr.shape[0]
     if arr.ndim == 1:
-        mean = arr.mean()
-        std = arr.std()
-        mn = arr.min()
-        mx = arr.max()
-        return {
-            "mean": np.array([mean]),
-            "std":  np.array([std]),
-            "min":  np.array([mn]),
-            "max":  np.array([mx]),
-            "count": np.array(count),
-        }
+        arr = arr.reshape(-1, 1)
     # ndim >= 2: 沿第一维 (时间) 聚合
-    mean = arr.mean(axis=0)
-    std = arr.std(axis=0)
-    mn = arr.min(axis=0)
-    mx = arr.max(axis=0)
-    return {
-        "mean": mean,
-        "std":  std,
-        "min":  mn,
-        "max":  mx,
+    stats = {
+        "mean": arr.mean(axis=0),
+        "std":  arr.std(axis=0),
+        "min":  arr.min(axis=0),
+        "max":  arr.max(axis=0),
         "count": np.array(count),
     }
+    for q in DEFAULT_QUANTILES:
+        stats[f"q{int(q * 100):02d}"] = np.quantile(arr, q, axis=0)
+    return stats
 
 
 def compute_raw_stats_v21(src: Path, info: dict, progress_cb: ProgressCb,
@@ -310,7 +299,7 @@ def compute_raw_stats_v21(src: Path, info: dict, progress_cb: ProgressCb,
                           include_videos: bool = True) -> dict:
     """从 v2.1 源数据集的原始 parquet + mp4 重新计算 per-feature 全局 stats。
 
-    返回: { feature_name: { "mean","std","min","max","count" } }  (numpy 值)
+    返回: { feature_name: { "mean","std","min","max","count","qXX"... } }  (numpy 值)
     不依赖 episodes_stats.jsonl。
 
     实现方式: 逐 episode 扫, 每个 feature 先算 episode 级统计, 再用
@@ -496,12 +485,13 @@ def _normalize_count(c: Any) -> np.ndarray:
 
 
 def aggregate_feature_stats(stats_ft_list: list[dict]) -> dict:
-    """官方 aggregate_feature_stats 的本地实现（不含 quantile 合并）。
+    """官方 aggregate_feature_stats 的本地实现，并保留本工具使用的 qXX 字段。
 
     对 shape/count 做了容错：
     - count 允许是 scalar / [N] / np.array(N) 等，会被归一化到标量。
     - mean/std/min/max 按每个 episode 的 shape 广播，若 episode 之间 shape
       不一致会抛出 ValueError（由调用方捕获记录）。
+    - qXX 按 episode count 加权聚合，与可视化保存路径保持一致。
     """
     if not stats_ft_list:
         raise ValueError("empty stats list")
@@ -528,13 +518,21 @@ def aggregate_feature_stats(stats_ft_list: list[dict]) -> dict:
     weighted_var = (variances.astype(np.float64) + delta ** 2) * counts_bc
     total_var = weighted_var.sum(axis=0) / total_count
 
-    return {
+    merged = {
         "min": np.min(mins, axis=0),
         "max": np.max(maxs, axis=0),
         "mean": total_mean,
         "std": np.sqrt(total_var),
         "count": total_count,
     }
+    for metric in stats_ft_list[0]:
+        if not metric.startswith("q"):
+            continue
+        if not all(metric in s for s in stats_ft_list):
+            continue
+        values = np.stack([np.asarray(s[metric]) for s in stats_ft_list])
+        merged[metric] = (values.astype(np.float64) * counts_bc).sum(axis=0) / total_count
+    return merged
 
 
 def aggregate_stats(stats_list: list[dict]) -> dict:
@@ -559,6 +557,9 @@ def aggregate_stats(stats_list: list[dict]) -> dict:
                     "std": np.asarray(fallback["std"]),
                     "count": _normalize_count(fallback["count"]),
                 }
+                for metric, value in fallback.items():
+                    if metric.startswith("q"):
+                        out[k][metric] = np.asarray(value)
                 warnings.append(f"feature '{k}' 聚合失败, 已用第一份 episode 的 stats 作为 fallback: {e}")
             except Exception as e2:  # pylint: disable=broad-except
                 warnings.append(f"feature '{k}' 聚合失败且 fallback 也失败: {e2}")
