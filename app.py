@@ -1169,7 +1169,7 @@ class DatasetEditor:
     def _smooth_values_at_velocity_anomalies(values, velocity_anomaly, window=5):
         values = np.asarray(values, dtype=np.float64).reshape(-1)
         velocity_anomaly = np.asarray(velocity_anomaly, dtype=bool).reshape(-1)
-        if values.size < 2 or velocity_anomaly.size != values.size - 1:
+        if values.size < 3 or velocity_anomaly.size != values.size - 1:
             return None
 
         anomaly_idx = np.flatnonzero(velocity_anomaly)
@@ -1185,15 +1185,39 @@ class DatasetEditor:
         for idx in anomaly_idx:
             center = idx + 1
             start = max(1, center - radius)
-            end = min(values.size, center + radius + 1)
+            end = min(values.size - 1, center + radius + 1)
             affected[start:end] = True
 
-        padded = np.pad(values, (radius, radius), mode="edge")
-        kernel = np.ones(window, dtype=np.float64) / float(window)
-        candidate = np.convolve(padded, kernel, mode="valid")
-
         smoothed = values.copy()
-        smoothed[affected] = candidate[affected]
+        affected_idx = np.flatnonzero(affected)
+        if affected_idx.size == 0:
+            return None
+
+        segments = []
+        seg_start = int(affected_idx[0])
+        prev = int(affected_idx[0])
+        for raw_idx in affected_idx[1:]:
+            idx = int(raw_idx)
+            if idx == prev + 1:
+                prev = idx
+                continue
+            segments.append((seg_start, prev))
+            seg_start = idx
+            prev = idx
+        segments.append((seg_start, prev))
+
+        for start, end in segments:
+            left_anchor = max(0, start - 1)
+            right_anchor = min(values.size - 1, end + 1)
+            span = right_anchor - left_anchor
+            if span <= 0:
+                continue
+            for frame_idx in range(start, end + 1):
+                alpha = (frame_idx - left_anchor) / span
+                smoothed[frame_idx] = (
+                    values[left_anchor] * (1.0 - alpha)
+                    + values[right_anchor] * alpha
+                )
         return smoothed, affected, anomaly_idx
 
     @staticmethod
@@ -1228,7 +1252,7 @@ class DatasetEditor:
 
         affected_delta = np.abs(delta[affected])
         return {
-            "method": "local_moving_average",
+            "method": "boundary_linear_interpolation",
             "window": int(window),
             "source": "velocity_anomaly",
             "anomaly_count": int(anomaly_idx.size),

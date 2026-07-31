@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "app.py", line 4023, in <module>
+    import ros2_converter as r2c
+  File "C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\4da1c7f90246577d\ros2_converter.py", line 109, in <module>
+    def _extract_joint_names(msg) -> list[str]:
+TypeError: 'type' object is not subscriptable

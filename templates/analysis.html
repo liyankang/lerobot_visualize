@@ -680,7 +680,7 @@
                 <span class="legend-chip"><span class="legend-dot position"></span>位值 theta<span class="term-help" tabindex="0" data-tip="位值: 直接展示关节在时间轴上的位置变化，用来对照速度变化发生在什么姿态区间。">?</span></span>
                 <span class="legend-chip"><span class="legend-dot velocity"></span>速度 v<span class="term-help" tabindex="0" data-tip="速度: v_t = (θ_t - θ_{t-1}) / (t_t - t_{t-1})">?</span></span>
                 <span class="legend-chip"><span class="legend-dot anomaly"></span>速度突变点<span class="term-help" tabindex="0" data-tip="突变阈值: threshold = max(median(|x|) + 6*MAD(|x|), mean(|x|) + 3*std(|x|))。超过阈值的速度点会标成红色。">?</span></span>
-                <span class="legend-chip"><span class="legend-dot smoothing"></span>动作平滑建议<span class="term-help" tabindex="0" data-tip="只对 Action 生效: 复用速度突变点，在对应位值帧附近用 5 帧局部均值生成绿色虚线预览，不会写回数据集。">?</span></span>
+                <span class="legend-chip"><span class="legend-dot smoothing"></span>动作平滑建议<span class="term-help" tabindex="0" data-tip="只对 Action 生效: 复用速度突变点，在对应位值帧附近用 5 帧窗口两侧锚点线性插值生成绿色虚线预览，不会写回数据集。">?</span></span>
                 <span class="legend-chip">滚轮缩放 / 直接拖动平移 / 悬停同步 / 点击锁定时间</span>
             </div>
             <div id="joint-group-list" class="joint-group-list"></div>

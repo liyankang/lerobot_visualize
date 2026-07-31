@@ -17,7 +17,7 @@ const TERM_TIPS = {
     position: '位值: 直接展示代表性 episode 中该关节在时间轴上的位置变化。',
     velocity: '速度: v_t = (theta_t - theta_{t-1}) / (t_t - t_{t-1})。图里展示的是代表性 episode 的速度曲线。',
     anomaly: '突变阈值: 对当前曲线先计算 |x| 的中位数 median 和 MAD，再取 threshold = max(median(|x|) + 6*MAD(|x|), mean(|x|) + 3*std(|x|))。超过阈值的点会用红色标出。',
-    smoothing: '动作平滑: 复用速度突变点，把突变转移到对应 action 位值帧，并只在这些帧附近用 5 帧局部均值生成预览曲线。',
+    smoothing: '动作平滑: 复用速度突变点，把突变转移到对应 action 位值帧，并用 5 帧窗口两侧锚点做线性插值生成预览曲线。',
 };
 
 const METRIC_DEFS = {
