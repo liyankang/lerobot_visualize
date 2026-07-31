@@ -105,6 +105,11 @@
             align-items: center;
             gap: 6px;
         }
+        .fix-panel {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #e5e7eb;
+        }
         .status {
             margin-top: 10px;
             padding: 9px 12px;
@@ -188,6 +193,15 @@
             line-height: 1.55;
             word-break: break-word;
         }
+        .fixable {
+            margin-left: 6px;
+            border-radius: 999px;
+            padding: 2px 7px;
+            background: #dbeafe;
+            color: #1d4ed8;
+            font-size: 11px;
+            font-weight: 700;
+        }
         .tabs {
             display: flex;
             gap: 8px;
@@ -255,6 +269,16 @@
         <div class="options">
             <label><input id="include-videos" type="checkbox"> 检查视频文件存在性</label>
             <label>错误样例数 <input id="max-examples" type="text" value="5" style="min-width:60px;width:70px;flex:0"></label>
+        </div>
+        <div id="fix-panel" class="fix-panel hidden">
+            <div class="input-row">
+                <label>修复输出</label>
+                <input id="fix-output-path" type="text" placeholder="/abs/path/to/lerobot_dataset_fixed">
+                <button id="fix-btn" class="btn">一键修复可修复项</button>
+            </div>
+            <div class="options">
+                <label><input id="fix-overwrite" type="checkbox"> 允许覆盖输出目录</label>
+            </div>
         </div>
         <div id="status" class="status">等待输入数据集路径。</div>
     </section>

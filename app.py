@@ -4135,6 +4135,281 @@ def _finalize_training_report(root_path: Path, profile: str, checks: list, detai
     }
 
 
+def _load_task_rows_for_fix(root_path: Path) -> list[dict]:
+    tasks_jsonl = root_path / "meta" / "tasks.jsonl"
+    rows = []
+    if tasks_jsonl.exists():
+        for row_idx, row in enumerate(DatasetEditor._read_jsonl(tasks_jsonl)):
+            if not isinstance(row, dict):
+                continue
+            task = row.get("task")
+            if not isinstance(task, str) or not task.strip():
+                continue
+            raw_idx = row.get("task_index", row_idx)
+            try:
+                task_index = int(raw_idx)
+            except (TypeError, ValueError):
+                continue
+            rows.append({"task_index": task_index, "task": task.strip()})
+    if rows:
+        rows.sort(key=lambda item: item["task_index"])
+        return rows
+
+    tasks_parquet = root_path / "meta" / "tasks.parquet"
+    if tasks_parquet.exists():
+        df = pd.read_parquet(tasks_parquet)
+        if "task_index" in df.columns:
+            idx_col = pd.to_numeric(df["task_index"], errors="coerce").tolist()
+        else:
+            idx_col = list(range(len(df)))
+        index_values = [str(value) for value in df.index.tolist()]
+        default_range_index = index_values == [str(i) for i in range(len(df))]
+        if not default_range_index:
+            task_col = index_values
+        elif "task" in df.columns:
+            task_col = df["task"].astype(str).tolist()
+        else:
+            task_col = []
+        for raw_idx, task in zip(idx_col, task_col):
+            if pd.isna(raw_idx) or not str(task).strip():
+                continue
+            rows.append({"task_index": int(raw_idx), "task": str(task).strip()})
+    rows.sort(key=lambda item: item["task_index"])
+    return rows
+
+
+def _rewrite_tasks_files_for_training(root_path: Path) -> list[str]:
+    actions = []
+    rows = _load_task_rows_for_fix(root_path)
+    if not rows:
+        return actions
+
+    meta_dir = root_path / "meta"
+    _write_jsonl = globals().get("_write_jsonl")
+    if _write_jsonl:
+        _write_jsonl(meta_dir / "tasks.jsonl", rows)
+    else:
+        with open(meta_dir / "tasks.jsonl", "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    actions.append(f"重写 tasks.jsonl ({len(rows)} tasks)")
+
+    tasks_df = (
+        pd.DataFrame(rows)[["task_index", "task"]]
+        .sort_values("task_index")
+        .reset_index(drop=True)
+        .set_index("task", drop=True)
+    )
+    tasks_df.to_parquet(meta_dir / "tasks.parquet", index=True)
+    actions.append("重建 tasks.parquet: task 字符串写入 DataFrame index")
+    return actions
+
+
+def _episode_meta_lookup(root_path: Path) -> dict:
+    lookup = {}
+    path = root_path / "meta" / "episodes.jsonl"
+    if not path.exists():
+        return lookup
+    for row in DatasetEditor._read_jsonl(path):
+        if not isinstance(row, dict):
+            continue
+        try:
+            lookup[int(row.get("episode_index"))] = dict(row)
+        except (TypeError, ValueError):
+            continue
+    return lookup
+
+
+def _rewrite_episode_parquet_format(root_path: Path) -> list[str]:
+    actions = []
+    info = json.loads((root_path / "meta" / "info.json").read_text(encoding="utf-8"))
+    fps = float(info.get("fps", 30) or 30)
+    episode_meta = _episode_meta_lookup(root_path)
+    parquets = sorted((root_path / "data").rglob("*.parquet")) if (root_path / "data").exists() else []
+    global_index = 0
+    updated = 0
+    dropped_task_col = 0
+
+    for pq_path in parquets:
+        ep_idx = DatasetEditor._parse_episode_index(pq_path.stem)
+        if ep_idx is None:
+            continue
+        df = pd.read_parquet(pq_path)
+        n = len(df)
+        changed = False
+
+        if "task" in df.columns and "task_index" in df.columns:
+            df = df.drop(columns=["task"])
+            dropped_task_col += 1
+            changed = True
+
+        expected_episode = np.full(n, int(ep_idx), dtype=np.int64)
+        if "episode_index" not in df.columns or not np.array_equal(
+            pd.to_numeric(df["episode_index"], errors="coerce").fillna(-1).to_numpy(dtype=np.int64),
+            expected_episode,
+        ):
+            df["episode_index"] = expected_episode
+            changed = True
+
+        expected_frame = np.arange(n, dtype=np.int64)
+        if "frame_index" not in df.columns or not np.array_equal(
+            pd.to_numeric(df["frame_index"], errors="coerce").fillna(-1).to_numpy(dtype=np.int64),
+            expected_frame,
+        ):
+            df["frame_index"] = expected_frame
+            changed = True
+
+        expected_index = np.arange(global_index, global_index + n, dtype=np.int64)
+        if "index" not in df.columns or not np.array_equal(
+            pd.to_numeric(df["index"], errors="coerce").fillna(-1).to_numpy(dtype=np.int64),
+            expected_index,
+        ):
+            df["index"] = expected_index
+            changed = True
+
+        expected_ts = np.arange(n, dtype=np.float64) / max(fps, 1e-9)
+        ts_needs_rewrite = True
+        if "timestamp" in df.columns:
+            ts = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=np.float64)
+            ts_needs_rewrite = (
+                ts.size != n
+                or np.any(~np.isfinite(ts))
+                or (n >= 2 and np.any(np.diff(ts) <= 0))
+            )
+        if ts_needs_rewrite:
+            df["timestamp"] = expected_ts
+            changed = True
+
+        meta_task_index = episode_meta.get(ep_idx, {}).get("task_index")
+        if "task_index" not in df.columns and meta_task_index is not None:
+            try:
+                df["task_index"] = int(meta_task_index)
+                changed = True
+            except (TypeError, ValueError):
+                pass
+        elif "task_index" in df.columns:
+            numeric_task = pd.to_numeric(df["task_index"], errors="coerce")
+            if numeric_task.isna().any() and meta_task_index is not None:
+                try:
+                    df["task_index"] = int(meta_task_index)
+                    changed = True
+                except (TypeError, ValueError):
+                    pass
+            else:
+                casted = numeric_task.astype("int64")
+                if not np.array_equal(casted.to_numpy(), df["task_index"].to_numpy()):
+                    df["task_index"] = casted
+                    changed = True
+
+        if changed:
+            df.to_parquet(pq_path, index=False)
+            updated += 1
+        global_index += n
+
+    if updated:
+        actions.append(f"重写 episode parquet 格式字段 ({updated} files)")
+    if dropped_task_col:
+        actions.append(f"删除 parquet 非标准 task 列 ({dropped_task_col} files)")
+    return actions
+
+
+def _rewrite_episode_metadata_for_training(root_path: Path) -> list[str]:
+    actions = []
+    meta_dir = root_path / "meta"
+    info_path = meta_dir / "info.json"
+    if not info_path.exists():
+        return actions
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    episode_meta = _episode_meta_lookup(root_path)
+    parquets = sorted((root_path / "data").rglob("*.parquet")) if (root_path / "data").exists() else []
+
+    episodes = []
+    total_frames = 0
+    for pq_path in parquets:
+        ep_idx = DatasetEditor._parse_episode_index(pq_path.stem)
+        if ep_idx is None:
+            continue
+        df = pd.read_parquet(pq_path)
+        old = episode_meta.get(ep_idx, {})
+        row = dict(old)
+        row["episode_index"] = int(ep_idx)
+        row["length"] = int(len(df))
+        if "task_index" in df.columns and len(df):
+            try:
+                row["task_index"] = int(pd.to_numeric(df["task_index"], errors="coerce").dropna().iloc[0])
+            except Exception:  # pylint: disable=broad-except
+                pass
+        episodes.append(row)
+        total_frames += len(df)
+
+    episodes.sort(key=lambda row: int(row["episode_index"]))
+    with open(meta_dir / "episodes.jsonl", "w", encoding="utf-8") as f:
+        for row in episodes:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    actions.append(f"重写 episodes.jsonl ({len(episodes)} episodes)")
+
+    info["total_episodes"] = len(episodes)
+    info["total_frames"] = int(total_frames)
+    info["data_path"] = "data/chunk-{chunk_index:03d}/episode_{episode_index:06d}.parquet"
+    info["video_path"] = "videos/chunk-{chunk_index:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+    with open(info_path, "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2, ensure_ascii=False)
+    actions.append("更新 info.json total_episodes/total_frames/path 模板")
+    return actions
+
+
+def _recompute_numeric_stats_for_training(root_path: Path) -> list[str]:
+    editor = DatasetEditor(str(root_path), joint_config=_joint_config_override)
+    global_stats, episode_stats = editor.compute_stats(skip_video_stats=True)
+    meta_dir = root_path / "meta"
+    with open(meta_dir / "stats.json", "w", encoding="utf-8") as f:
+        json.dump(global_stats, f, indent=2, ensure_ascii=False)
+    with open(meta_dir / "episodes_stats.jsonl", "w", encoding="utf-8") as f:
+        for row in episode_stats:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return ["重算数值 stats.json / episodes_stats.jsonl (跳过视频统计)"]
+
+
+def _fix_training_dataset_format(src_path: Path, dst_path: Path, *, overwrite=False,
+                                 profile="general") -> dict:
+    src_path = src_path.resolve()
+    dst_path = dst_path.resolve()
+    if src_path == dst_path:
+        raise ValueError("修复输出路径不能与原数据集相同")
+    if dst_path.exists():
+        if not overwrite:
+            raise ValueError("输出路径已存在。如需覆盖，请勾选允许覆盖输出目录")
+        shutil.rmtree(dst_path)
+    shutil.copytree(src_path, dst_path)
+
+    actions = []
+    info_path = dst_path / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8")) if info_path.exists() else {}
+    version = info.get("codebase_version", "unknown")
+    actions.extend(_rewrite_tasks_files_for_training(dst_path))
+    if version == "v2.1":
+        actions.extend(_rewrite_episode_parquet_format(dst_path))
+        actions.extend(_rewrite_episode_metadata_for_training(dst_path))
+        actions.extend(_recompute_numeric_stats_for_training(dst_path))
+    elif version == "v3.0":
+        actions.append("v3.0 数据集仅修复 tasks.parquet 索引格式，未改写合并数据文件")
+    else:
+        actions.append(f"未知版本 {version}，仅尝试修复 task 元数据")
+    report = _run_training_usability_check(
+        dst_path,
+        profile=profile,
+        include_videos=False,
+        max_issue_examples=5,
+    )
+    return {
+        "success": True,
+        "source_path": str(src_path),
+        "output_path": str(dst_path),
+        "actions": actions,
+        "report": report,
+    }
+
+
 @app.route("/api/training-check/inspect", methods=["POST"])
 def api_training_check_inspect():
     data = request.get_json() or {}
@@ -4170,6 +4445,32 @@ def api_training_check_run():
         return jsonify(report)
     except Exception as e:
         log.exception("训练可用性检查失败")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/training-check/fix", methods=["POST"])
+def api_training_check_fix():
+    data = request.get_json() or {}
+    root = (data.get("path") or "").strip()
+    output = (data.get("output_path") or "").strip()
+    if not root:
+        return jsonify({"error": "path 不能为空"}), 400
+    if not output:
+        return jsonify({"error": "output_path 不能为空"}), 400
+    src_path = Path(root).expanduser().resolve()
+    dst_path = Path(output).expanduser().resolve()
+    if not src_path.exists():
+        return jsonify({"error": f"路径不存在: {src_path}"}), 400
+    try:
+        result = _fix_training_dataset_format(
+            src_path,
+            dst_path,
+            overwrite=bool(data.get("overwrite", False)),
+            profile=(data.get("profile") or "general"),
+        )
+        return jsonify(result)
+    except Exception as e:
+        log.exception("训练数据集格式修复失败")
         return jsonify({"error": str(e)}), 500
 
 
