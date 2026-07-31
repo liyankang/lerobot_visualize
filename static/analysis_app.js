@@ -17,6 +17,7 @@ const TERM_TIPS = {
     position: '位值: 直接展示代表性 episode 中该关节在时间轴上的位置变化。',
     velocity: '速度: v_t = (theta_t - theta_{t-1}) / (t_t - t_{t-1})。图里展示的是代表性 episode 的速度曲线。',
     anomaly: '突变阈值: 对当前曲线先计算 |x| 的中位数 median 和 MAD，再取 threshold = max(median(|x|) + 6*MAD(|x|), mean(|x|) + 3*std(|x|))。超过阈值的点会用红色标出。',
+    smoothing: '动作平滑: 复用速度突变点，把突变转移到对应 action 位值帧，并只在这些帧附近用 5 帧局部均值生成预览曲线。',
 };
 
 const METRIC_DEFS = {
@@ -215,7 +216,7 @@ function ensureChartPlugins() {
     }
 }
 
-function registerChartGroup(preview) {
+function registerChartGroup(preview, options = {}) {
     const availableMetrics = Object.keys(METRIC_DEFS).filter(metricKey => hasSeries(preview, metricKey));
     if (!availableMetrics.length) return null;
 
@@ -230,6 +231,7 @@ function registerChartGroup(preview) {
 
     ANALYSIS_STATE.chartGroups.set(groupId, {
         preview,
+        sourceType: options.sourceType || 'unknown',
         availableMetrics,
         chartIds,
         range: null,
@@ -275,7 +277,8 @@ function renderMetricPanel(groupId, metricKey) {
 
 function renderSourcePanel(label, axisName, metrics) {
     const preview = metrics?.temporal_preview;
-    const groupId = registerChartGroup(preview);
+    const sourceType = label === 'Action' ? 'action' : 'state';
+    const groupId = registerChartGroup(preview, { sourceType });
 
     if (!groupId) {
         return `
@@ -451,7 +454,7 @@ function buildThresholdDataset(points, threshold) {
     ];
 }
 
-function buildChartDatasets(metricDef, seriesData) {
+function buildChartDatasets(metricDef, seriesData, group = null) {
     const datasets = [
         {
             label: metricDef.label,
@@ -465,6 +468,26 @@ function buildChartDatasets(metricDef, seriesData) {
             fill: false,
         },
     ];
+
+    const smoothingData = (
+        group?.sourceType === 'action' && metricDef.key === 'position'
+            ? normalizeSeries(group.preview?.smoothing?.position)
+            : null
+    );
+    if (smoothingData?.points?.length) {
+        datasets.push({
+            label: '动作平滑建议',
+            data: smoothingData.points,
+            borderColor: '#16a34a',
+            backgroundColor: 'rgba(22,163,74,0.12)',
+            borderDash: [5, 4],
+            borderWidth: 2,
+            pointRadius: 0,
+            pointHoverRadius: 3,
+            tension: 0.16,
+            fill: false,
+        });
+    }
 
     if (metricDef.key === 'velocity') {
         datasets.push(...buildThresholdDataset(seriesData.points, seriesData.threshold));
@@ -696,6 +719,13 @@ function updateChartMeta(chartId) {
         pills.push(`<span class="chart-pill">阈值 ${formatNumber(seriesData.threshold)} ${helpIcon('anomaly')}</span>`);
         pills.push(`<span class="chart-pill">突变点 ${formatInteger(seriesData.anomalyCount)}</span>`);
     }
+    if (chartContext.metricKey === 'position' && group?.sourceType === 'action' && group.preview?.smoothing) {
+        const smoothing = group.preview.smoothing;
+        pills.push(`<span class="chart-pill">动作平滑建议 ${helpIcon('smoothing')}</span>`);
+        pills.push(`<span class="chart-pill">突变点 ${formatInteger(smoothing.anomaly_count)}</span>`);
+        pills.push(`<span class="chart-pill">窗口 ${formatInteger(smoothing.window)} 帧</span>`);
+        pills.push(`<span class="chart-pill">最大修正 ${formatNumber(smoothing.max_abs_delta)}</span>`);
+    }
 
     metaEl.innerHTML = pills.join('');
 }
@@ -874,7 +904,7 @@ function createOrUpdateChart(chartId) {
     const chart = new Chart(canvas, {
         type: 'line',
         data: {
-            datasets: buildChartDatasets(metricDef, seriesData),
+            datasets: buildChartDatasets(metricDef, seriesData, group),
         },
         options,
     });

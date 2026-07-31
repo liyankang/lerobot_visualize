@@ -1165,7 +1165,70 @@ class DatasetEditor:
             "threshold": round(float(threshold), 6) if threshold is not None and np.isfinite(threshold) else None,
         }
 
-    def _build_temporal_preview(self, episodes, joint_idx):
+    @staticmethod
+    def _build_action_smoothing_preview(values, timestamps, selected_idx, velocity_anomaly, window=5):
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        timestamps = np.asarray(timestamps, dtype=np.float64).reshape(-1)
+        velocity_anomaly = np.asarray(velocity_anomaly, dtype=bool).reshape(-1)
+        if values.size < 2 or timestamps.size != values.size or velocity_anomaly.size != values.size - 1:
+            return None
+
+        anomaly_idx = np.flatnonzero(velocity_anomaly)
+        if anomaly_idx.size == 0:
+            return None
+
+        window = max(3, int(window or 5))
+        if window % 2 == 0:
+            window += 1
+        radius = window // 2
+
+        affected = np.zeros(values.shape, dtype=bool)
+        for idx in anomaly_idx:
+            center = idx + 1
+            start = max(1, center - radius)
+            end = min(values.size, center + radius + 1)
+            affected[start:end] = True
+
+        padded = np.pad(values, (radius, radius), mode="edge")
+        kernel = np.ones(window, dtype=np.float64) / float(window)
+        candidate = np.convolve(padded, kernel, mode="valid")
+
+        smoothed = values.copy()
+        smoothed[affected] = candidate[affected]
+        delta = smoothed - values
+
+        position_mask = affected[1:]
+        preview_position = DatasetEditor._slice_preview_xy(
+            timestamps[1:],
+            smoothed[1:],
+            selected_idx,
+            anomaly_mask=position_mask,
+        )
+        preview_delta = DatasetEditor._slice_preview_xy(
+            timestamps[1:],
+            delta[1:],
+            selected_idx,
+            anomaly_mask=position_mask,
+        )
+
+        affected_delta = np.abs(delta[affected])
+        return {
+            "method": "local_moving_average",
+            "window": int(window),
+            "source": "velocity_anomaly",
+            "anomaly_count": int(anomaly_idx.size),
+            "affected_frame_count": int(np.sum(affected)),
+            "position": preview_position,
+            "delta": preview_delta,
+            "max_abs_delta": (
+                round(float(affected_delta.max()), 6) if affected_delta.size else 0.0
+            ),
+            "mean_abs_delta": (
+                round(float(affected_delta.mean()), 6) if affected_delta.size else 0.0
+            ),
+        }
+
+    def _build_temporal_preview(self, episodes, joint_idx, include_smoothing=False):
         representative = None
         for episode in sorted(episodes, key=lambda item: item["values"].shape[0], reverse=True):
             if joint_idx < episode["values"].shape[1] and episode["values"].shape[0] >= 2:
@@ -1225,7 +1288,7 @@ class DatasetEditor:
                 velocity.size, max_points=96, priority_mask=velocity_anomaly
             )
 
-        return {
+        preview = {
             "episode_index": int(representative["episode_index"]),
             "frame_count": int(values.size),
             "position": self._slice_preview_xy(
@@ -1245,6 +1308,14 @@ class DatasetEditor:
                 timestamps[3:], jerk, anomaly_mask=jerk_anomaly, threshold=jerk_threshold
             ),
         }
+        if include_smoothing:
+            smoothing = self._build_action_smoothing_preview(
+                values, timestamps, shared_preview_idx, velocity_anomaly, window=5
+            )
+            if smoothing:
+                preview["smoothing"] = smoothing
+
+        return preview
 
     def _compute_constraint_metric_bundle(self, episodes, joint_idx, constraint):
         if not constraint:
@@ -1666,7 +1737,9 @@ class DatasetEditor:
                 action_bundle = self._compute_joint_metric_bundle(action_matrix[:, idx])
                 if action_bundle:
                     action_bundle["temporal"] = self._compute_temporal_metric_bundle(action_episodes, idx)
-                    action_bundle["temporal_preview"] = self._build_temporal_preview(action_episodes, idx)
+                    action_bundle["temporal_preview"] = self._build_temporal_preview(
+                        action_episodes, idx, include_smoothing=True
+                    )
                     action_bundle["constraints"] = self._compute_constraint_metric_bundle(
                         action_episodes,
                         idx,
