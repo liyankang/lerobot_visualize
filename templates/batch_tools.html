@@ -217,14 +217,13 @@
                 </label>
                 <div class="split">
                     <div class="field">
-                        <label for="motion-threshold">静止阈值</label>
-                        <input id="motion-threshold" type="number" step="0.00001" value="0.0001">
+                        <label for="motion-threshold">动作强度阈值</label>
+                        <input id="motion-threshold" type="number" step="0.1" value="10">
                     </div>
                     <div class="field">
-                        <label for="motion-metric">运动量</label>
+                        <label for="motion-metric">动作强度算法</label>
                         <select id="motion-metric">
-                            <option value="max_abs">max_abs</option>
-                            <option value="norm">norm</option>
+                            <option value="euclidean">euclidean</option>
                         </select>
                     </div>
                 </div>

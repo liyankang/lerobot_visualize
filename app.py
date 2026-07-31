@@ -3637,11 +3637,11 @@ def _batch_options_from_request(data):
         "auto_length_iqr": bool(data.get("auto_length_iqr", False)),
         "iqr_multiplier": opt_float("iqr_multiplier", 1.5),
         "trim_static_edges": bool(data.get("trim_static_edges", False)),
-        "motion_threshold": opt_float("motion_threshold", 1e-4),
+        "motion_threshold": opt_float("motion_threshold", 10.0),
         "margin_frames": opt_int("margin_frames", 0),
         "min_static_frames": opt_int("min_static_frames", 1),
         "joint_indices": batch_tools.parse_joint_indices(data.get("joint_indices")),
-        "motion_metric": data.get("motion_metric") or "max_abs",
+        "motion_metric": data.get("motion_metric") or "euclidean",
     }
 
 

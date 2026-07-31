@@ -5,7 +5,7 @@ LeRobot 数据集批处理工具。
 本模块不依赖 Flask，也不直接导入 app.py。调用方传入 DatasetEditor 实例后，
 可组合执行:
   - 按 episode 长度删除过短/过长数据
-  - 按 observation.state 运动量裁掉开头/结尾静止帧
+  - 按 action 滑动窗口动作强度裁掉开头/结尾静止帧
 """
 
 from __future__ import annotations
@@ -107,37 +107,50 @@ def find_length_deletions(
     return rows
 
 
-def _state_array(editor: Any, episode_index: int,
-                 joint_indices: Optional[Sequence[int]]) -> Optional[np.ndarray]:
+def _vector_array(
+    editor: Any,
+    episode_index: int,
+    column: str,
+    joint_indices: Optional[Sequence[int]],
+) -> Optional[np.ndarray]:
     if not hasattr(editor, "_get_state_array"):
         return None
-    states = editor._get_state_array(episode_index)
-    if states is None or len(states) == 0:
+    values = _vector_column_array(editor, episode_index, column)
+    if values is None or len(values) == 0:
         return None
-    states = np.asarray(states, dtype=np.float64)
-    if states.ndim != 2 or states.shape[0] < 2 or states.shape[1] == 0:
-        return None
+    values = np.asarray(values, dtype=np.float64)
     if joint_indices:
-        valid = [int(i) for i in joint_indices if 0 <= int(i) < states.shape[1]]
+        valid = [int(i) for i in joint_indices if 0 <= int(i) < values.shape[1]]
         if not valid:
             return None
-        states = states[:, valid]
-    return states
+        values = values[:, valid]
+    if values.ndim != 2 or values.shape[0] < 1 or values.shape[1] == 0:
+        return None
+    return values
+
+
+def _sliding_window_motion(values: np.ndarray, window_size: int) -> np.ndarray:
+    window_size = max(2, int(window_size))
+    if values.shape[0] < window_size:
+        return np.asarray([], dtype=np.float64)
+    # 用窗口左右端点的欧氏距离作为这个窗口的动作强度。
+    return np.linalg.norm(values[window_size - 1:] - values[:-(window_size - 1)], axis=1)
 
 
 def find_static_edge_trim(
     editor: Any,
     episode_index: int,
-    motion_threshold: float,
+    motion_threshold: float = 10.0,
     margin_frames: int = 0,
     min_static_frames: int = 1,
     joint_indices: Optional[Sequence[int]] = None,
-    motion_metric: str = "max_abs",
+    window_size: int = 5,
+    motion_metric: str = "euclidean",
 ) -> Dict[str, Any]:
     """检测单个 episode 开头/结尾应删除的静止帧。
 
-    motion_threshold 是相邻两帧 observation.state 的变化阈值。默认 max_abs
-    表示任一维度变化超过阈值即认为运动；norm 表示使用 L2 范数。
+    motion_threshold 是 action 滑窗动作强度阈值。默认使用 5 帧滑窗
+    的左右端点欧氏距离作为动作强度，超过 10 视为移动。
     """
     n = int(len(editor.episode_data.get(episode_index, [])))
     base = {
@@ -156,17 +169,19 @@ def find_static_edge_trim(
         base["reason"] = "episode too short"
         return base
 
-    states = _state_array(editor, episode_index, joint_indices)
-    if states is None:
+    actions = _vector_array(editor, episode_index, "action", joint_indices)
+    if actions is None:
         base["status"] = "skipped"
-        base["reason"] = "observation.state unavailable"
+        base["reason"] = "action unavailable"
         return base
 
-    diffs = np.abs(np.diff(states, axis=0))
-    if motion_metric == "norm":
-        motion = np.linalg.norm(diffs, axis=1)
-    else:
-        motion = np.max(diffs, axis=1)
+    window_size = max(2, int(window_size))
+    if actions.shape[0] < window_size:
+        base["status"] = "skipped"
+        base["reason"] = f"episode shorter than window_size={window_size}"
+        return base
+
+    motion = _sliding_window_motion(actions, window_size)
     moving = motion > float(motion_threshold)
 
     if not np.any(moving):
@@ -181,8 +196,9 @@ def find_static_edge_trim(
     margin = max(0, int(margin_frames))
     min_static = max(1, int(min_static_frames))
 
+    # 第一个移动窗口的左侧都删掉；最后一个移动窗口的右侧都删掉。
     keep_start = max(0, first_move - margin)
-    keep_end = min(n - 1, last_move + 1 + margin)
+    keep_end = min(n - 1, last_move + window_size - 1 + margin)
 
     start_delete = list(range(0, keep_start))
     end_delete = list(range(keep_end + 1, n))
@@ -198,13 +214,14 @@ def find_static_edge_trim(
         "trim_end": len(end_delete),
         "keep_start": keep_start,
         "keep_end": keep_end,
-        "first_move_transition": first_move,
-        "last_move_transition": last_move,
+        "first_move_window": first_move,
+        "last_move_window": last_move,
+        "window_size": window_size,
         "max_motion": float(np.max(motion)) if len(motion) else 0.0,
         "mean_motion": float(np.mean(motion)) if len(motion) else 0.0,
     })
     if delete_frames:
-        base["reason"] = "trim static edges"
+        base["reason"] = "trim static edges by action window motion"
     else:
         base["status"] = "skipped"
         base["reason"] = "static edge shorter than min_static_frames"
@@ -214,11 +231,12 @@ def find_static_edge_trim(
 def find_static_edge_trims(
     editor: Any,
     excluded_episodes: Optional[Set[int]] = None,
-    motion_threshold: float = 1e-4,
+    motion_threshold: float = 10.0,
     margin_frames: int = 0,
     min_static_frames: int = 1,
     joint_indices: Optional[Sequence[int]] = None,
-    motion_metric: str = "max_abs",
+    window_size: int = 5,
+    motion_metric: str = "euclidean",
 ) -> List[Dict[str, Any]]:
     excluded = excluded_episodes or set()
     rows = []
@@ -233,6 +251,7 @@ def find_static_edge_trims(
             margin_frames=margin_frames,
             min_static_frames=min_static_frames,
             joint_indices=joint_indices,
+            window_size=window_size,
             motion_metric=motion_metric,
         )
         if row.get("delete_frames"):
@@ -354,11 +373,12 @@ def build_batch_plan(
     auto_length_iqr: bool = False,
     iqr_multiplier: float = 1.5,
     trim_static_edges: bool = False,
-    motion_threshold: float = 1e-4,
+    motion_threshold: float = 10.0,
     margin_frames: int = 0,
     min_static_frames: int = 1,
     joint_indices: Optional[Sequence[int]] = None,
-    motion_metric: str = "max_abs",
+    window_size: int = 5,
+    motion_metric: str = "euclidean",
     include_curves: bool = False,
     max_curve_episodes: int = 80,
     max_curve_points: int = 260,
@@ -383,6 +403,7 @@ def build_batch_plan(
             margin_frames=margin_frames,
             min_static_frames=min_static_frames,
             joint_indices=joint_indices,
+            window_size=window_size,
             motion_metric=motion_metric,
         )
 

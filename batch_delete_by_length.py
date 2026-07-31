@@ -106,8 +106,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--motion-threshold",
         type=float,
-        default=1e-4,
-        help="相邻帧 observation.state 变化量阈值，低于该值视为静止，默认 1e-4",
+        default=10.0,
+        help="action 5 帧滑窗左右端点的欧氏距离阈值，超过该值视为移动，默认 10",
     )
     parser.add_argument(
         "--margin-frames",
@@ -128,9 +128,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--motion-metric",
-        choices=("max_abs", "norm"),
-        default="max_abs",
-        help="运动量计算方式，默认 max_abs",
+        choices=("euclidean",),
+        default="euclidean",
+        help="动作强度计算方式，固定为 euclidean",
     )
     parser.add_argument(
         "--list-limit",
@@ -188,7 +188,7 @@ def main() -> int:
             "lower={lower:.2f}, upper={upper:.2f}, k={multiplier:.2f}".format(**iqr)
         )
     if args.trim_static_edges:
-        print(f"静止段裁剪阈值: {args.motion_threshold}")
+        print(f"动作强度阈值: {args.motion_threshold}")
         print(f"边界保留帧: {args.margin_frames}")
         print(f"最小静止段长度: {args.min_static_frames}")
     print(
