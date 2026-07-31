@@ -861,9 +861,15 @@ def convert_v21_to_v30(src: Path, dst: Path, progress_cb: ProgressCb,
                  [{"task_index": int(r["task_index"]), "task": r["task"]}
                   for r in sorted(legacy_tasks, key=lambda x: int(x["task_index"]))])
 
-    # 同时生成 tasks.parquet 兼容补充
-    tasks_df = pd.DataFrame(legacy_tasks)[["task_index", "task"]].sort_values("task_index").reset_index(drop=True)
-    tasks_df.to_parquet(dst / "meta" / "tasks.parquet", index=False)
+    # v3 LeRobotDataset 通过 tasks.iloc[task_idx].name 读取任务文本，
+    # 因此 task 字符串必须是 DataFrame index，而不是普通列。
+    tasks_df = (
+        pd.DataFrame(legacy_tasks)[["task_index", "task"]]
+        .sort_values("task_index")
+        .reset_index(drop=True)
+        .set_index("task", drop=True)
+    )
+    tasks_df.to_parquet(dst / "meta" / "tasks.parquet", index=True)
 
     progress_cb({"stage": "meta", "title": "写入 tasks / episodes / stats",
                  "current": 1, "total": 4, "detail": "tasks.jsonl 写入完成"})
@@ -1156,11 +1162,15 @@ def _load_v30_tasks(src: Path) -> list[dict]:
             idx_col = df["task_index"].astype(int).tolist()
         else:
             idx_col = list(range(len(df)))
-        if "task" in df.columns:
+        index_col = df.index.astype(str).tolist()
+        default_range_index = index_col == [str(i) for i in range(len(df))]
+        if not default_range_index:
+            task_col = index_col
+        elif "task" in df.columns:
+            # 兼容旧转换器写出的坏格式: task 被保存成普通列。
             task_col = df["task"].astype(str).tolist()
         else:
-            # task 有可能作为 index
-            task_col = df.index.astype(str).tolist()
+            task_col = index_col
         for idx, t in zip(idx_col, task_col):
             rows.append({"task_index": int(idx), "task": str(t)})
     elif jsonl_path.exists():

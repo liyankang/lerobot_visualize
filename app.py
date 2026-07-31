@@ -4029,6 +4029,39 @@ def _run_training_usability_check(root_path: Path, *, profile="general",
         fixable=len(eps_stats_rows) != actual_episode_total,
     )
 
+    tasks_parquet_path = meta_dir / "tasks.parquet"
+    if tasks_parquet_path.exists():
+        try:
+            tasks_df = pd.read_parquet(tasks_parquet_path)
+            index_values = [str(value) for value in tasks_df.index.tolist()]
+            default_range_index = index_values == [str(i) for i in range(len(tasks_df))]
+            has_task_column = "task" in tasks_df.columns
+            if default_range_index and has_task_column:
+                add(
+                    "error" if language_profile else "warn",
+                    "task.tasks_parquet_index",
+                    "tasks.parquet task 索引",
+                    "tasks.parquet 把 task 存成普通列且 index 是整数；LeRobotDataset 使用 tasks.iloc[task_idx].name 时会取到整数。",
+                    fixable=True,
+                )
+            elif default_range_index:
+                add(
+                    "error",
+                    "task.tasks_parquet_index",
+                    "tasks.parquet task 索引",
+                    "tasks.parquet index 是整数且没有 task 列，无法可靠恢复任务文本。",
+                    fixable=False,
+                )
+            else:
+                add(
+                    "pass",
+                    "task.tasks_parquet_index",
+                    "tasks.parquet task 索引",
+                    "task 字符串位于 DataFrame index，兼容 tasks.iloc[task_idx].name。",
+                )
+        except Exception as exc:  # pylint: disable=broad-except
+            add("error", "task.tasks_parquet_read", "tasks.parquet 读取失败", str(exc))
+
     action_matrix, action_names, _ = editor._collect_feature_series("action", "action_joint")  # pylint: disable=protected-access
     if action_matrix.size:
         std = np.std(action_matrix, axis=0)
