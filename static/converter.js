@@ -214,7 +214,7 @@ $('go-convert').addEventListener('click', async () => {
     if (statsMode === 'raw' && (tv === 'v2.0' || tv === 'v3.0')) {
         payload.recompute_stats = true;
         payload.video_stride = Math.max(1, Number($('opt-video-stride').value) || 1);
-        payload.include_video_stats = $('opt-include-video-stats').checked;
+        payload.include_video_stats = !$('opt-skip-video-stats').checked;
     }
     $('go-convert').disabled = true;
     try {

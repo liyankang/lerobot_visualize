@@ -344,8 +344,8 @@
                     <span style="font-size:12px;color:#888">1 = 全部解码最准；5 表示每 5 帧取 1 帧（大约快 5×，误差 &lt; 1% 通常可接受）</span>
                 </div>
                 <label style="font-size:12px;display:flex;align-items:center;gap:6px;color:#333">
-                    <input type="checkbox" id="opt-include-video-stats" checked>
-                    包含视频 stats（取消勾选则只重算 parquet 中的数值列，跳过所有 mp4 解码）
+                    <input type="checkbox" id="opt-skip-video-stats">
+                    跳过视频 stats（只重算 parquet 中的数值列，不解码 mp4）
                 </label>
             </div>
         </div>
