@@ -129,6 +129,28 @@
             cursor: not-allowed;
         }
 
+        .smooth-actions {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--line);
+        }
+
+        .smooth-options {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-top: 10px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .smooth-options label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
         .status-line {
             margin-top: 10px;
             font-size: 13px;
@@ -631,6 +653,16 @@
             <div class="input-row">
                 <input id="dataset-path" class="path-input" type="text" placeholder="例如: /data/lerobot/my_dataset">
                 <button id="analyze-btn" class="primary-btn">开始分析</button>
+            </div>
+            <div id="smooth-actions-panel" class="smooth-actions hidden">
+                <div class="input-row">
+                    <input id="smooth-output-path" class="path-input" type="text" placeholder="平滑后数据集输出路径，例如: /data/lerobot/my_dataset_smoothed">
+                    <button id="smooth-btn" class="primary-btn">写出动作平滑数据集</button>
+                </div>
+                <div class="smooth-options">
+                    <label><input id="smooth-skip-video-stats" type="checkbox" checked> 跳过视频统计</label>
+                    <label><input id="smooth-overwrite" type="checkbox"> 允许覆盖输出目录</label>
+                </div>
             </div>
             <div id="analysis-status" class="status-line">等待加载数据集。</div>
         </section>

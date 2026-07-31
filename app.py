@@ -1166,11 +1166,10 @@ class DatasetEditor:
         }
 
     @staticmethod
-    def _build_action_smoothing_preview(values, timestamps, selected_idx, velocity_anomaly, window=5):
+    def _smooth_values_at_velocity_anomalies(values, velocity_anomaly, window=5):
         values = np.asarray(values, dtype=np.float64).reshape(-1)
-        timestamps = np.asarray(timestamps, dtype=np.float64).reshape(-1)
         velocity_anomaly = np.asarray(velocity_anomaly, dtype=bool).reshape(-1)
-        if values.size < 2 or timestamps.size != values.size or velocity_anomaly.size != values.size - 1:
+        if values.size < 2 or velocity_anomaly.size != values.size - 1:
             return None
 
         anomaly_idx = np.flatnonzero(velocity_anomaly)
@@ -1195,6 +1194,22 @@ class DatasetEditor:
 
         smoothed = values.copy()
         smoothed[affected] = candidate[affected]
+        return smoothed, affected, anomaly_idx
+
+    @staticmethod
+    def _build_action_smoothing_preview(values, timestamps, selected_idx, velocity_anomaly, window=5):
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        timestamps = np.asarray(timestamps, dtype=np.float64).reshape(-1)
+        if timestamps.size != values.size:
+            return None
+
+        result = DatasetEditor._smooth_values_at_velocity_anomalies(
+            values, velocity_anomaly, window=window
+        )
+        if result is None:
+            return None
+
+        smoothed, affected, anomaly_idx = result
         delta = smoothed - values
 
         position_mask = affected[1:]
@@ -1226,6 +1241,106 @@ class DatasetEditor:
             "mean_abs_delta": (
                 round(float(affected_delta.mean()), 6) if affected_delta.size else 0.0
             ),
+        }
+
+    def smooth_action_jumps(self, window=5):
+        """Apply the same velocity-anomaly based local smoothing to all action rows."""
+        dim = self._infer_feature_dim("action")
+        if not dim or dim <= 0:
+            raise ValueError("当前数据集没有可平滑的 action 特征")
+
+        window = max(3, int(window or 5))
+        if window % 2 == 0:
+            window += 1
+
+        episode_reports = []
+        total_anomalies = 0
+        total_affected = 0
+        max_abs_delta = 0.0
+
+        for ep_idx, df in sorted(self.episode_data.items()):
+            if "action" not in df.columns or len(df) < 2:
+                continue
+
+            action_rows = [self._to_list(value) for value in df["action"].tolist()]
+            valid_rows = [row for row in action_rows if len(row) == dim]
+            if len(valid_rows) != len(action_rows):
+                continue
+
+            values = np.asarray(action_rows, dtype=np.float64)
+            timestamps = self._sanitize_episode_timestamps(
+                [
+                    np.nan if self._to_float_or_none(value) is None else self._to_float_or_none(value)
+                    for value in (df["timestamp"].tolist() if "timestamp" in df.columns else [])
+                ],
+                len(values),
+            )
+            nominal_dt = 1.0 / max(float(self.info.get("fps", 30) or 30), 1e-6)
+            dt = np.diff(timestamps)
+            dt = np.where(dt > 1e-9, dt, nominal_dt)
+
+            smoothed_values = values.copy()
+            affected_any = np.zeros(len(values), dtype=bool)
+            ep_anomalies = 0
+            ep_max_delta = 0.0
+            joint_reports = []
+
+            for joint_idx in range(dim):
+                velocity = np.diff(values[:, joint_idx]) / dt
+                threshold = self._compute_anomaly_threshold(velocity)
+                velocity_anomaly = (
+                    np.abs(velocity) > threshold
+                    if threshold is not None and velocity.size
+                    else np.zeros(velocity.shape, dtype=bool)
+                )
+                result = self._smooth_values_at_velocity_anomalies(
+                    values[:, joint_idx], velocity_anomaly, window=window
+                )
+                if result is None:
+                    continue
+
+                joint_smoothed, affected, anomaly_idx = result
+                delta = joint_smoothed - values[:, joint_idx]
+                smoothed_values[:, joint_idx] = joint_smoothed
+                affected_any |= affected
+                joint_max_delta = float(np.max(np.abs(delta[affected]))) if np.any(affected) else 0.0
+                ep_anomalies += int(anomaly_idx.size)
+                ep_max_delta = max(ep_max_delta, joint_max_delta)
+                joint_reports.append({
+                    "joint_index": int(joint_idx),
+                    "anomaly_count": int(anomaly_idx.size),
+                    "affected_frame_count": int(np.sum(affected)),
+                    "max_abs_delta": round(joint_max_delta, 6),
+                    "threshold": round(float(threshold), 6) if threshold is not None and np.isfinite(threshold) else None,
+                })
+
+            if ep_anomalies <= 0:
+                continue
+
+            df = df.copy()
+            df["action"] = [row.copy() for row in smoothed_values]
+            self.episode_data[ep_idx] = df
+
+            affected_count = int(np.sum(affected_any))
+            total_anomalies += ep_anomalies
+            total_affected += affected_count
+            max_abs_delta = max(max_abs_delta, ep_max_delta)
+            episode_reports.append({
+                "episode_index": int(ep_idx),
+                "anomaly_count": int(ep_anomalies),
+                "affected_frame_count": affected_count,
+                "max_abs_delta": round(ep_max_delta, 6),
+                "joints": joint_reports,
+            })
+
+        self.modified = bool(episode_reports)
+        return {
+            "window": int(window),
+            "episodes_changed": len(episode_reports),
+            "anomaly_count": int(total_anomalies),
+            "affected_frame_count": int(total_affected),
+            "max_abs_delta": round(float(max_abs_delta), 6),
+            "episodes": episode_reports,
         }
 
     def _build_temporal_preview(self, episodes, joint_idx, include_smoothing=False):
@@ -3438,6 +3553,66 @@ def api_analysis_load():
         return jsonify({"success": True, **report})
     except Exception as e:
         log.exception("分析页加载数据集失败")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/analysis/smooth_actions", methods=["POST"])
+def api_analysis_smooth_actions():
+    global _analysis_editor
+    data = request.get_json() or {}
+    path = data.get("path", "").strip()
+    output = data.get("output_path", "").strip()
+    window = int(data.get("window", 5) or 5)
+    skip_video_stats = bool(data.get("skip_video_stats", True))
+    overwrite = bool(data.get("overwrite", False))
+
+    if not path:
+        return jsonify({"error": "请输入数据集路径"}), 400
+    if not output:
+        return jsonify({"error": "请指定平滑后数据集输出路径"}), 400
+
+    p = Path(path).resolve()
+    out = Path(output).resolve()
+    if not p.exists():
+        return jsonify({"error": f"路径不存在: {path}"}), 400
+    if not (p / "meta" / "info.json").exists():
+        return jsonify({"error": "无效的 LeRobot 数据集 (缺少 meta/info.json)"}), 400
+    if out == p:
+        return jsonify({"error": "输出路径不能与原数据集相同，请保存到一个新目录"}), 400
+    if out.exists() and not overwrite:
+        return jsonify({"error": "输出路径已存在。如需覆盖，请勾选允许覆盖输出目录"}), 400
+
+    try:
+        set_save_progress("prepare", "正在准备动作平滑", "正在加载数据集并计算突变点...", 0, 1, True)
+        editor = DatasetEditor(str(p), joint_config=_joint_config_override)
+        smoothing_report = editor.smooth_action_jumps(window=window)
+        if smoothing_report["anomaly_count"] <= 0:
+            set_save_progress("done", "未发现突变点", "没有需要写回的 action 平滑修正", 1, 1, False)
+            _analysis_editor = editor
+            report = editor.build_joint_analysis_report()
+            return jsonify({
+                "success": True,
+                "path": str(p),
+                "output_path": None,
+                "smoothing": smoothing_report,
+                "report": report,
+                "message": "未发现需要平滑的 action 突变点，未写出新数据集",
+            })
+
+        editor.save_as(str(out), set_save_progress, skip_video_stats=skip_video_stats)
+        _analysis_editor = DatasetEditor(str(out), joint_config=_joint_config_override)
+        report = _analysis_editor.build_joint_analysis_report()
+        set_save_progress("done", "动作平滑完成", f"平滑数据集已保存到: {out}", 1, 1, False)
+        return jsonify({
+            "success": True,
+            "path": str(p),
+            "output_path": str(out),
+            "smoothing": smoothing_report,
+            "report": report,
+        })
+    except Exception as e:
+        set_save_progress("error", "动作平滑失败", str(e), 0, 0, False)
+        log.exception("动作平滑写回失败")
         return jsonify({"error": str(e)}), 500
 
 

@@ -154,6 +154,13 @@ function buildChartId(groupId, metricKey) {
     return `${groupId}-${metricKey}`;
 }
 
+function buildDefaultSmoothedPath(path) {
+    const text = String(path || '').trim();
+    if (!text) return '';
+    const trimmed = text.replace(/[\\/]+$/, '');
+    return `${trimmed}_smoothed`;
+}
+
 function getChartCanvasWrap(chart) {
     return chart?.canvas?.closest('.chart-canvas-wrap') || null;
 }
@@ -455,16 +462,21 @@ function buildThresholdDataset(points, threshold) {
 }
 
 function buildChartDatasets(metricDef, seriesData, group = null) {
+    const hasSmoothing = Boolean(
+        group?.sourceType === 'action'
+        && metricDef.key === 'position'
+        && group.preview?.smoothing?.position
+    );
     const datasets = [
         {
             label: metricDef.label,
             data: seriesData.points,
             borderColor: metricDef.color,
             backgroundColor: `${metricDef.color}20`,
-            borderWidth: 2.2,
+            borderWidth: hasSmoothing ? 1.35 : 2.2,
             pointRadius: 0,
             pointHoverRadius: 3,
-            tension: 0.14,
+            tension: hasSmoothing ? 0.08 : 0.14,
             fill: false,
         },
     ];
@@ -480,11 +492,11 @@ function buildChartDatasets(metricDef, seriesData, group = null) {
             data: smoothingData.points,
             borderColor: '#16a34a',
             backgroundColor: 'rgba(22,163,74,0.12)',
-            borderDash: [5, 4],
-            borderWidth: 2,
+            borderDash: [7, 4],
+            borderWidth: 3.1,
             pointRadius: 0,
-            pointHoverRadius: 3,
-            tension: 0.16,
+            pointHoverRadius: 4,
+            tension: 0.2,
             fill: false,
         });
     }
@@ -976,6 +988,20 @@ function renderReport(report) {
     });
 }
 
+function updateSmoothPanel(path) {
+    const panel = $('smooth-actions-panel');
+    const outputInput = $('smooth-output-path');
+    if (!panel || !outputInput) return;
+    if (!path) {
+        panel.classList.add('hidden');
+        return;
+    }
+    panel.classList.remove('hidden');
+    if (!outputInput.value.trim()) {
+        outputInput.value = buildDefaultSmoothedPath(path);
+    }
+}
+
 async function loadAnalysis() {
     const input = $('dataset-path');
     const path = input.value.trim();
@@ -993,6 +1019,7 @@ async function loadAnalysis() {
         ANALYSIS_STATE.report = report;
         renderReport(report);
         localStorage.setItem('lerobot-analysis-last-path', path);
+        updateSmoothPanel(path);
         const groupCount = (report.joint_groups || []).length;
         if (chartLibraryReady()) {
             setStatus(`分析完成，已按 ${formatInteger(groupCount)} 个 joint group 生成标准位值 / 速度联动图，可同步缩放、拖动和选时查看。`, 'success');
@@ -1007,17 +1034,85 @@ async function loadAnalysis() {
     }
 }
 
+async function smoothActions() {
+    const datasetInput = $('dataset-path');
+    const outputInput = $('smooth-output-path');
+    const path = datasetInput?.value.trim();
+    const outputPath = outputInput?.value.trim();
+    if (!path || ANALYSIS_STATE.loading) {
+        if (!path) setStatus('请先加载数据集。', 'error');
+        return;
+    }
+    if (!outputPath) {
+        setStatus('请填写平滑后数据集输出路径。', 'error');
+        return;
+    }
+
+    ANALYSIS_STATE.loading = true;
+    $('analyze-btn').disabled = true;
+    $('smooth-btn').disabled = true;
+    setStatus('正在计算 action 突变点并写出平滑数据集...', 'loading');
+
+    try {
+        const result = await postJson('/api/analysis/smooth_actions', {
+            path,
+            output_path: outputPath,
+            window: 5,
+            skip_video_stats: Boolean($('smooth-skip-video-stats')?.checked),
+            overwrite: Boolean($('smooth-overwrite')?.checked),
+        });
+
+        const nextReport = result.report;
+        if (nextReport) {
+            ANALYSIS_STATE.report = nextReport;
+            renderReport(nextReport);
+        }
+
+        const nextPath = result.output_path || path;
+        if (result.output_path) {
+            datasetInput.value = result.output_path;
+            outputInput.value = buildDefaultSmoothedPath(result.output_path);
+            localStorage.setItem('lerobot-analysis-last-path', result.output_path);
+        }
+        updateSmoothPanel(nextPath);
+
+        const smoothing = result.smoothing || {};
+        if (result.output_path) {
+            setStatus(
+                `动作平滑已写出: ${result.output_path}。处理 ${formatInteger(smoothing.episodes_changed)} 个 episode，突变点 ${formatInteger(smoothing.anomaly_count)}，受影响帧 ${formatInteger(smoothing.affected_frame_count)}，最大修正 ${formatNumber(smoothing.max_abs_delta)}。`,
+                'success'
+            );
+        } else {
+            setStatus(result.message || '未发现需要平滑的 action 突变点。', 'success');
+        }
+    } catch (error) {
+        setStatus(error.message || '动作平滑写出失败', 'error');
+    } finally {
+        ANALYSIS_STATE.loading = false;
+        $('analyze-btn').disabled = false;
+        $('smooth-btn').disabled = false;
+    }
+}
+
 function restoreLastPath() {
     const lastPath = localStorage.getItem('lerobot-analysis-last-path');
     if (lastPath && !$('dataset-path').value.trim()) {
         $('dataset-path').value = lastPath;
+        updateSmoothPanel(lastPath);
     }
 }
 
 window.addEventListener('DOMContentLoaded', () => {
     restoreLastPath();
     $('analyze-btn').addEventListener('click', loadAnalysis);
+    $('smooth-btn').addEventListener('click', smoothActions);
     $('dataset-path').addEventListener('keydown', event => {
         if (event.key === 'Enter') loadAnalysis();
+    });
+    $('dataset-path').addEventListener('input', event => {
+        const outputInput = $('smooth-output-path');
+        if (outputInput && !outputInput.value.trim()) {
+            outputInput.value = buildDefaultSmoothedPath(event.target.value);
+        }
     });
 });
