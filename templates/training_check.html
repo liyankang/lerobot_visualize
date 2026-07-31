@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>训练可用性检查 - LeRobot 工具箱</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f3f4f6;
+            color: #1f2937;
+            min-height: 100vh;
+        }
+        header {
+            background: #111827;
+            color: #f9fafb;
+            padding: 14px 24px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.22);
+        }
+        header a { color: #cbd5e1; text-decoration: none; font-size: 13px; }
+        header a:hover { color: #fff; }
+        header h1 { font-size: 16px; font-weight: 650; }
+        header .spacer { flex: 1; }
+        header .version { color: #94a3b8; font-size: 12px; }
+        main {
+            width: min(1280px, calc(100vw - 32px));
+            margin: 18px auto 32px;
+        }
+        .panel {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 18px;
+            margin-bottom: 14px;
+            box-shadow: 0 1px 4px rgba(15,23,42,0.05);
+        }
+        .panel h2 {
+            font-size: 15px;
+            margin-bottom: 10px;
+        }
+        .panel p {
+            color: #6b7280;
+            font-size: 13px;
+            line-height: 1.6;
+            margin-bottom: 12px;
+        }
+        .input-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+        .input-row label {
+            min-width: 86px;
+            color: #4b5563;
+            font-size: 13px;
+        }
+        input[type="text"], select {
+            flex: 1;
+            min-width: 260px;
+            padding: 9px 11px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 13px;
+            background: #fff;
+            color: #111827;
+        }
+        input[type="text"] { font-family: Consolas, "SFMono-Regular", monospace; }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #2563eb;
+        }
+        .btn {
+            border: 1px solid #2563eb;
+            background: #2563eb;
+            color: #fff;
+            border-radius: 8px;
+            padding: 9px 14px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn:disabled {
+            opacity: 0.58;
+            cursor: not-allowed;
+        }
+        .btn.secondary {
+            background: #fff;
+            color: #2563eb;
+        }
+        .options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            color: #6b7280;
+            font-size: 12px;
+        }
+        .options label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 9px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            background: #eff6ff;
+            color: #1d4ed8;
+        }
+        .status.error { background: #fef2f2; color: #b91c1c; }
+        .status.success { background: #ecfdf5; color: #047857; }
+        .status.warn { background: #fffbeb; color: #92400e; }
+        .hidden { display: none !important; }
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 10px;
+        }
+        .summary-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 12px;
+            background: #f9fafb;
+        }
+        .summary-card .label {
+            color: #6b7280;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+        .summary-card .value {
+            margin-top: 5px;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        .value.error { color: #dc2626; }
+        .value.warn { color: #d97706; }
+        .value.pass { color: #059669; }
+        .check-list {
+            display: grid;
+            gap: 8px;
+        }
+        .check-item {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 11px 12px;
+            background: #fff;
+        }
+        .check-item.error { border-color: #fecaca; background: #fff7f7; }
+        .check-item.warn { border-color: #fde68a; background: #fffdf4; }
+        .check-item.pass { border-color: #bbf7d0; background: #f7fef9; }
+        .check-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 5px;
+        }
+        .level {
+            min-width: 48px;
+            border-radius: 999px;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 750;
+            text-align: center;
+        }
+        .level.error { background: #dc2626; color: #fff; }
+        .level.warn { background: #f59e0b; color: #111827; }
+        .level.pass { background: #059669; color: #fff; }
+        .level.info { background: #64748b; color: #fff; }
+        .check-title {
+            font-size: 13px;
+            font-weight: 650;
+        }
+        .check-id {
+            margin-left: auto;
+            color: #9ca3af;
+            font-family: Consolas, "SFMono-Regular", monospace;
+            font-size: 11px;
+        }
+        .check-detail {
+            color: #4b5563;
+            font-size: 12px;
+            line-height: 1.55;
+            word-break: break-word;
+        }
+        .tabs {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+        .tab {
+            border: 1px solid #d1d5db;
+            background: #fff;
+            border-radius: 999px;
+            padding: 6px 11px;
+            cursor: pointer;
+            color: #4b5563;
+            font-size: 12px;
+        }
+        .tab.active {
+            background: #111827;
+            color: #fff;
+            border-color: #111827;
+        }
+        .feature-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .tag {
+            font-family: Consolas, "SFMono-Regular", monospace;
+            font-size: 11px;
+            border: 1px solid #e5e7eb;
+            border-radius: 999px;
+            padding: 4px 8px;
+            background: #f9fafb;
+            color: #4b5563;
+        }
+    </style>
+</head>
+<body>
+<header>
+    <a href="/">← 返回工具箱</a>
+    <h1>训练可用性检查</h1>
+    <div class="spacer"></div>
+    <span class="version">LeRobot v2.1 first</span>
+</header>
+
+<main>
+    <section class="panel">
+        <h2>选择数据集</h2>
+        <p>检查 LeRobot 训练前最容易出错的结构、字段、shape、数据类型、task、timestamp 和 stats。视频检查可选，默认关闭。</p>
+        <div class="input-row">
+            <label>数据集路径</label>
+            <input id="dataset-path" type="text" placeholder="/abs/path/to/lerobot_dataset">
+            <button id="inspect-btn" class="btn secondary">扫描</button>
+        </div>
+        <div class="input-row">
+            <label>Policy</label>
+            <select id="profile">
+                <option value="general">通用 LeRobot</option>
+                <option value="pi05">PI05 / 语言条件策略</option>
+                <option value="act">ACT</option>
+                <option value="diffusion">DiffusionPolicy</option>
+                <option value="bet">VQ-BeT / BeT</option>
+            </select>
+            <button id="run-btn" class="btn">开始检查</button>
+        </div>
+        <div class="options">
+            <label><input id="include-videos" type="checkbox"> 检查视频文件存在性</label>
+            <label>错误样例数 <input id="max-examples" type="text" value="5" style="min-width:60px;width:70px;flex:0"></label>
+        </div>
+        <div id="status" class="status">等待输入数据集路径。</div>
+    </section>
+
+    <section id="inspect-panel" class="panel hidden">
+        <h2>数据集概况</h2>
+        <div id="inspect-summary" class="summary-grid"></div>
+        <div id="feature-tags" class="feature-tags" style="margin-top:12px"></div>
+    </section>
+
+    <section id="result-panel" class="panel hidden">
+        <h2>检查结果</h2>
+        <div id="result-summary" class="summary-grid" style="margin-bottom:14px"></div>
+        <div class="tabs">
+            <button class="tab active" data-filter="all">全部</button>
+            <button class="tab" data-filter="error">ERROR</button>
+            <button class="tab" data-filter="warn">WARN</button>
+            <button class="tab" data-filter="pass">PASS</button>
+        </div>
+        <div id="check-list" class="check-list"></div>
+    </section>
+</main>
+
+<script src="/static/training_check.js"></script>
+</body>
+</html>

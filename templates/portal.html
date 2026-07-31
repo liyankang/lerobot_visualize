@@ -51,6 +51,7 @@
         .card .icon-verify { background: linear-gradient(135deg, #11998e, #38ef7d); }
         .card .icon-image { background: linear-gradient(135deg, #a855f7, #6366f1); }
         .card .icon-batch { background: linear-gradient(135deg, #0f766e, #2563eb); }
+        .card .icon-training { background: linear-gradient(135deg, #1d4ed8, #059669); }
 
         .card h2 { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
         .card p { font-size: 13px; color: #666; line-height: 1.6; }
@@ -153,6 +154,20 @@
             </div>
             <h2>Stats 准确性校验</h2>
             <p>从原始 <code>parquet</code> + <code>mp4</code> 重新计算 per-feature 的 mean/std/min/max，与数据集自带的 <code>meta/stats.json</code> 以及聚合 <code>episodes_stats.jsonl</code> 的结果逐项交叉比对。</p>
+            <span class="badge badge-ready">可用</span>
+        </a>
+
+        <a class="card" href="/training-check">
+            <div class="icon icon-training">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 11l3 3L22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                    <path d="M7 8h5"/>
+                    <path d="M7 16h8"/>
+                </svg>
+            </div>
+            <h2>训练可用性检查</h2>
+            <p>训练前检查数据集结构、字段 shape、数值类型、task 文本、timestamp/FPS、stats/q 值和 action 异常，提前拦截 dataloader 与策略预处理错误。</p>
             <span class="badge badge-ready">可用</span>
         </a>
 

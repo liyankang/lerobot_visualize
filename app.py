@@ -3640,6 +3640,506 @@ def api_analysis_smooth_actions():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/training-check")
+def training_check_page():
+    return render_template("training_check.html")
+
+
+def _training_check_item(level, check_id, title, detail, **extra):
+    item = {
+        "level": level,
+        "id": check_id,
+        "title": title,
+        "detail": detail,
+    }
+    item.update(extra)
+    return item
+
+
+def _json_type_name(value):
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, dict):
+        return "dict"
+    return type(value).__name__
+
+
+def _numeric_vector_matrix(df, column):
+    if column not in df.columns:
+        return None, "missing"
+    rows = []
+    for value in df[column].tolist():
+        row = DatasetEditor._to_list(value)
+        if not row:
+            return None, "non_numeric_or_empty"
+        rows.append(row)
+    if not rows:
+        return np.empty((0, 0), dtype=np.float64), None
+    widths = {len(row) for row in rows}
+    if len(widths) != 1:
+        return None, f"inconsistent_widths:{sorted(widths)}"
+    try:
+        return np.asarray(rows, dtype=np.float64), None
+    except Exception as exc:  # pylint: disable=broad-except
+        return None, f"cast_failed:{exc}"
+
+
+def _inspect_training_dataset(root_path: Path) -> dict:
+    info_path = root_path / "meta" / "info.json"
+    if not info_path.exists():
+        raise ValueError("无效的 LeRobot 数据集: 缺少 meta/info.json")
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    parquets = sorted((root_path / "data").rglob("*.parquet")) if (root_path / "data").exists() else []
+    video_files = sorted((root_path / "videos").rglob("*.mp4")) if (root_path / "videos").exists() else []
+    return {
+        "success": True,
+        "path": str(root_path),
+        "summary": {
+            "codebase_version": info.get("codebase_version", "unknown"),
+            "fps": info.get("fps"),
+            "robot_type": info.get("robot_type"),
+            "total_episodes": info.get("total_episodes"),
+            "total_frames": info.get("total_frames"),
+            "feature_count": len(info.get("features", {}) or {}),
+        },
+        "files": {
+            "episode_parquets": len(parquets),
+            "videos": len(video_files),
+            "has_episodes_jsonl": (root_path / "meta" / "episodes.jsonl").exists(),
+            "has_tasks_jsonl": (root_path / "meta" / "tasks.jsonl").exists(),
+            "has_stats_json": (root_path / "meta" / "stats.json").exists(),
+            "has_episodes_stats_jsonl": (root_path / "meta" / "episodes_stats.jsonl").exists(),
+        },
+        "features": sorted((info.get("features", {}) or {}).keys()),
+    }
+
+
+def _run_training_usability_check(root_path: Path, *, profile="general",
+                                  include_videos=False, max_issue_examples=5) -> dict:
+    checks = []
+    max_issue_examples = max(1, int(max_issue_examples or 5))
+
+    def add(level, check_id, title, detail, **extra):
+        checks.append(_training_check_item(level, check_id, title, detail, **extra))
+
+    meta_dir = root_path / "meta"
+    info_path = meta_dir / "info.json"
+    if not info_path.exists():
+        add("error", "structure.info", "缺少 meta/info.json", "这不是有效的 LeRobot 数据集根目录。")
+        return _finalize_training_report(root_path, profile, checks, {})
+
+    try:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        add("pass", "structure.info", "info.json 可读取", f"codebase_version={info.get('codebase_version', 'unknown')}")
+    except Exception as exc:  # pylint: disable=broad-except
+        add("error", "structure.info_parse", "info.json 解析失败", str(exc))
+        return _finalize_training_report(root_path, profile, checks, {})
+
+    required_meta = ["episodes.jsonl", "tasks.jsonl", "stats.json", "episodes_stats.jsonl"]
+    for name in required_meta:
+        path = meta_dir / name
+        add(
+            "pass" if path.exists() else "error",
+            f"structure.{name}",
+            f"{name} {'存在' if path.exists() else '缺失'}",
+            str(path),
+        )
+
+    version = info.get("codebase_version", "unknown")
+    add(
+        "pass" if version == "v2.1" else "warn",
+        "structure.version",
+        "LeRobot 版本",
+        f"当前 codebase_version={version}。本检查按 v2.1 训练数据约定执行。",
+    )
+
+    try:
+        editor = DatasetEditor(str(root_path), joint_config=_joint_config_override)
+    except Exception as exc:  # pylint: disable=broad-except
+        add("error", "load.dataset", "数据集加载失败", str(exc))
+        return _finalize_training_report(root_path, profile, checks, {"codebase_version": version})
+
+    summary = editor.get_summary()
+    features = info.get("features", {}) or {}
+    numeric_features = [
+        key for key, meta in features.items()
+        if isinstance(meta, dict) and meta.get("dtype") not in ("image", "video")
+    ]
+
+    info_episode_total = info.get("total_episodes")
+    actual_episode_total = len(editor.episode_data)
+    add(
+        "pass" if info_episode_total == actual_episode_total else "error",
+        "structure.total_episodes",
+        "episode 数量一致性",
+        f"info.total_episodes={info_episode_total}, 实际 parquet episodes={actual_episode_total}",
+    )
+
+    actual_frames = sum(len(df) for df in editor.episode_data.values())
+    info_frames = info.get("total_frames")
+    add(
+        "pass" if info_frames == actual_frames else "error",
+        "structure.total_frames",
+        "frame 总数一致性",
+        f"info.total_frames={info_frames}, 实际 parquet frames={actual_frames}",
+    )
+
+    episode_indices = sorted(editor.episode_data.keys())
+    expected_indices = list(range(len(episode_indices)))
+    add(
+        "pass" if episode_indices == expected_indices else "error",
+        "structure.episode_index_contiguous",
+        "episode_index 连续性",
+        "episode_index 从 0 连续递增。" if episode_indices == expected_indices else f"实际索引样例: {episode_indices[:20]}",
+    )
+
+    for required_col in ("observation.state", "action"):
+        declared = required_col in features
+        present_count = sum(1 for df in editor.episode_data.values() if required_col in df.columns)
+        add(
+            "pass" if declared and present_count == actual_episode_total else "error",
+            f"feature.{required_col}.presence",
+            f"{required_col} 字段存在性",
+            f"info 声明={declared}, parquet 含字段 episode={present_count}/{actual_episode_total}",
+        )
+
+    frame_bad = []
+    timestamp_bad = []
+    index_bad = []
+    fps = float(info.get("fps", 30) or 30)
+    expected_dt = 1.0 / max(fps, 1e-9)
+    global_indices = []
+    for ep_idx, df in sorted(editor.episode_data.items()):
+        n = len(df)
+        if "frame_index" not in df.columns:
+            frame_bad.append(f"ep{ep_idx}: missing")
+        else:
+            vals = pd.to_numeric(df["frame_index"], errors="coerce").to_numpy()
+            if vals.size != n or np.any(~np.isfinite(vals)) or not np.array_equal(vals.astype(int), np.arange(n)):
+                frame_bad.append(f"ep{ep_idx}: not 0..{n - 1}")
+
+        if "timestamp" not in df.columns:
+            timestamp_bad.append(f"ep{ep_idx}: missing")
+        else:
+            ts = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=np.float64)
+            if ts.size != n or np.any(~np.isfinite(ts)):
+                timestamp_bad.append(f"ep{ep_idx}: non-numeric")
+            elif n >= 2:
+                diffs = np.diff(ts)
+                if np.any(diffs <= 0):
+                    timestamp_bad.append(f"ep{ep_idx}: non-monotonic")
+                elif expected_dt > 0:
+                    drift = abs(float(np.mean(diffs)) - expected_dt) / expected_dt
+                    if drift > 0.05:
+                        timestamp_bad.append(f"ep{ep_idx}: dt drift {drift * 100:.2f}%")
+
+        if "index" in df.columns:
+            idx_vals = pd.to_numeric(df["index"], errors="coerce").to_numpy()
+            global_indices.extend([int(v) for v in idx_vals if np.isfinite(v)])
+        else:
+            index_bad.append(f"ep{ep_idx}: missing")
+
+    add(
+        "pass" if not frame_bad else "error",
+        "temporal.frame_index",
+        "frame_index 连续性",
+        "所有 episode 均为 0..N-1。" if not frame_bad else "; ".join(frame_bad[:max_issue_examples]),
+    )
+    add(
+        "pass" if not timestamp_bad else "error",
+        "temporal.timestamp",
+        "timestamp 单调与 FPS",
+        f"timestamp 单调，平均 dt 接近 1/fps={expected_dt:.6f}s。" if not timestamp_bad else "; ".join(timestamp_bad[:max_issue_examples]),
+    )
+    expected_global = list(range(actual_frames))
+    add(
+        "pass" if not index_bad and global_indices == expected_global else "warn",
+        "temporal.global_index",
+        "全局 index 连续性",
+        "index 全局连续。" if not index_bad and global_indices == expected_global else "index 缺失或不连续，部分 dataloader/工具可能依赖它。",
+    )
+
+    dtype_details = []
+    for feature_key in ("observation.state", "action"):
+        expected_dim = editor._infer_feature_dim(feature_key)  # pylint: disable=protected-access
+        bad_examples = []
+        nan_examples = []
+        observed_shapes = set()
+        for ep_idx, df in sorted(editor.episode_data.items()):
+            matrix, err = _numeric_vector_matrix(df, feature_key)
+            if err:
+                bad_examples.append(f"ep{ep_idx}: {err}")
+                continue
+            observed_shapes.add(tuple(matrix.shape[1:]))
+            if matrix.size and np.any(~np.isfinite(matrix)):
+                nan_examples.append(f"ep{ep_idx}: NaN/Inf")
+        shape_ok = observed_shapes == {(int(expected_dim),)} if expected_dim else len(observed_shapes) == 1
+        add(
+            "pass" if not bad_examples and shape_ok else "error",
+            f"dtype.{feature_key}",
+            f"{feature_key} 数值类型与 shape",
+            (
+                f"expected_dim={expected_dim}, observed_shapes={sorted(map(list, observed_shapes))}"
+                if not bad_examples else "; ".join(bad_examples[:max_issue_examples])
+            ),
+        )
+        add(
+            "pass" if not nan_examples else "error",
+            f"dtype.{feature_key}.finite",
+            f"{feature_key} NaN/Inf",
+            "未发现 NaN/Inf。" if not nan_examples else "; ".join(nan_examples[:max_issue_examples]),
+        )
+        dtype_details.append({
+            "feature": feature_key,
+            "expected_dim": expected_dim,
+            "observed_shapes": sorted([list(shape) for shape in observed_shapes]),
+        })
+
+    task_index_to_task = {}
+    task_errors = []
+    for row_idx, task in enumerate(editor.tasks):
+        if not isinstance(task, dict):
+            task_errors.append(f"tasks.jsonl line {row_idx}: type={_json_type_name(task)}")
+            continue
+        task_index = task.get("task_index", row_idx)
+        task_text = task.get("task")
+        normalized_task_index = None
+        if not isinstance(task_index, int):
+            task_errors.append(f"task_index={task_index} type={_json_type_name(task_index)}")
+        try:
+            normalized_task_index = int(task_index)
+        except (TypeError, ValueError):
+            task_errors.append(f"task_index={task_index} cannot cast to int")
+        if not isinstance(task_text, str) or not task_text.strip():
+            task_errors.append(f"task_index={task_index}: task type={_json_type_name(task_text)}")
+        elif normalized_task_index is not None:
+            task_index_to_task[normalized_task_index] = task_text
+    add(
+        "pass" if not task_errors else "error",
+        "task.tasks_jsonl",
+        "tasks.jsonl task 类型",
+        f"{len(task_index_to_task)} 条 task 文本可用。" if not task_errors else "; ".join(task_errors[:max_issue_examples]),
+        fixable=bool(task_errors),
+    )
+
+    missing_task_refs = []
+    parquet_task_type_bad = []
+    for ep_idx, df in sorted(editor.episode_data.items()):
+        em = next((item for item in editor.episodes_meta if item.get("episode_index") == ep_idx), {})
+        ep_task_index = em.get("task_index")
+        if ep_task_index is not None:
+            try:
+                normalized_ep_task_index = int(ep_task_index)
+            except (TypeError, ValueError):
+                missing_task_refs.append(f"episodes.jsonl ep{ep_idx}: task_index type={_json_type_name(ep_task_index)}")
+            else:
+                if normalized_ep_task_index not in task_index_to_task:
+                    missing_task_refs.append(f"episodes.jsonl ep{ep_idx}: task_index={ep_task_index}")
+        if "task_index" in df.columns:
+            for value in pd.unique(df["task_index"].dropna()):
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    missing_task_refs.append(f"parquet ep{ep_idx}: task_index type={_json_type_name(value)}")
+                    continue
+                if idx not in task_index_to_task:
+                    missing_task_refs.append(f"parquet ep{ep_idx}: task_index={idx}")
+        if "task" in df.columns and len(df):
+            sample_values = df["task"].dropna().head(10).tolist()
+            bad_values = [value for value in sample_values if not isinstance(value, str)]
+            if bad_values:
+                parquet_task_type_bad.append(
+                    f"ep{ep_idx}: task column sample type={_json_type_name(bad_values[0])}"
+                )
+    language_profile = str(profile).lower() in ("pi05", "pi0", "pi0.5", "openvla", "vla")
+    add(
+        "pass" if not missing_task_refs else "error",
+        "task.task_index_refs",
+        "task_index 引用完整性",
+        "episode/parquet task_index 均能映射到 tasks.jsonl。" if not missing_task_refs else "; ".join(missing_task_refs[:max_issue_examples]),
+    )
+    add(
+        "pass" if not parquet_task_type_bad else ("error" if language_profile else "warn"),
+        "task.parquet_task_type",
+        "parquet task 列类型",
+        "未发现非法 parquet task 列。" if not parquet_task_type_bad else "; ".join(parquet_task_type_bad[:max_issue_examples]),
+        fixable=bool(parquet_task_type_bad),
+    )
+
+    stats_path = meta_dir / "stats.json"
+    stats = {}
+    if stats_path.exists():
+        try:
+            stats = json.loads(stats_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # pylint: disable=broad-except
+            add("error", "stats.parse", "stats.json 解析失败", str(exc))
+    required_stats = ("mean", "std", "min", "max", "count", "q01", "q10", "q50", "q90", "q99")
+    for feature_key in numeric_features:
+        missing = [metric for metric in required_stats if metric not in (stats.get(feature_key) or {})]
+        level = "pass" if not missing else ("error" if feature_key in ("observation.state", "action") else "warn")
+        add(
+            level,
+            f"stats.{feature_key}",
+            f"{feature_key} stats 完整性",
+            "mean/std/min/max/count/q01/q10/q50/q90/q99 均存在。" if not missing else f"缺少: {', '.join(missing)}",
+            fixable=bool(missing),
+        )
+        expected_dim = editor._infer_feature_dim(feature_key)  # pylint: disable=protected-access
+        type_errors = []
+        feature_stats = stats.get(feature_key) or {}
+        for metric in required_stats:
+            if metric not in feature_stats:
+                continue
+            try:
+                arr = np.asarray(feature_stats[metric], dtype=np.float64)
+            except Exception as exc:  # pylint: disable=broad-except
+                type_errors.append(f"{metric}: cast_failed({exc})")
+                continue
+            if arr.size and np.any(~np.isfinite(arr)):
+                type_errors.append(f"{metric}: NaN/Inf")
+            if expected_dim and metric != "count":
+                flat_size = int(arr.reshape(-1).size)
+                if flat_size not in (1, int(expected_dim)):
+                    type_errors.append(f"{metric}: shape={list(arr.shape)}, expected_dim={expected_dim}")
+        add(
+            "pass" if not type_errors else ("error" if feature_key in ("observation.state", "action") else "warn"),
+            f"stats.{feature_key}.dtype",
+            f"{feature_key} stats 数据类型",
+            "stats 数值可解析，shape 与 feature dim 兼容。" if not type_errors else "; ".join(type_errors[:max_issue_examples]),
+            fixable=bool(type_errors),
+        )
+
+    eps_stats_path = meta_dir / "episodes_stats.jsonl"
+    eps_stats_rows = DatasetEditor._read_jsonl(eps_stats_path) if eps_stats_path.exists() else []
+    add(
+        "pass" if len(eps_stats_rows) == actual_episode_total else "warn",
+        "stats.episodes_stats_count",
+        "episodes_stats.jsonl 行数",
+        f"episodes_stats rows={len(eps_stats_rows)}, episodes={actual_episode_total}",
+        fixable=len(eps_stats_rows) != actual_episode_total,
+    )
+
+    action_matrix, action_names, _ = editor._collect_feature_series("action", "action_joint")  # pylint: disable=protected-access
+    if action_matrix.size:
+        std = np.std(action_matrix, axis=0)
+        near_static = [action_names[i] for i, value in enumerate(std) if float(value) < 1e-9]
+        add(
+            "pass" if not near_static else "warn",
+            "semantic.action_static",
+            "action 静止维度",
+            "action 各维均有变化。" if not near_static else f"近似不动维度: {', '.join(near_static[:max_issue_examples])}",
+        )
+        max_delta = 0.0
+        for _ep_idx, df in sorted(editor.episode_data.items()):
+            matrix, err = _numeric_vector_matrix(df, "action")
+            if err or matrix.shape[0] < 2:
+                continue
+            local = np.linalg.norm(np.diff(matrix, axis=0), axis=1)
+            if local.size:
+                max_delta = max(max_delta, float(np.max(local)))
+        add(
+            "pass" if max_delta <= 10 else "warn",
+            "semantic.action_jump",
+            "action 帧间欧氏跳变",
+            f"最大帧间动作距离={max_delta:.6g}，阈值参考=10。",
+        )
+
+    if include_videos:
+        video_keys = [
+            key for key, meta in features.items()
+            if isinstance(meta, dict) and meta.get("dtype") in ("image", "video")
+        ]
+        missing_videos = []
+        for ep_idx in sorted(editor.episode_data.keys()):
+            videos = editor._orig_video_files.get(ep_idx, {})  # pylint: disable=protected-access
+            for key in video_keys:
+                cam = key.split(".")[-1]
+                has_match = key in videos or cam in videos
+                if not has_match:
+                    missing_videos.append(f"ep{ep_idx}: {key}")
+        add(
+            "pass" if not missing_videos else "warn",
+            "video.files",
+            "视频文件存在性",
+            f"检查了 {len(video_keys)} 个 video/image feature。" if not missing_videos else "; ".join(missing_videos[:max_issue_examples]),
+        )
+
+    details = {
+        "summary": summary,
+        "profile": profile,
+        "dtype": dtype_details,
+        "numeric_features": numeric_features,
+    }
+    return _finalize_training_report(root_path, profile, checks, details)
+
+
+def _finalize_training_report(root_path: Path, profile: str, checks: list, details: dict) -> dict:
+    counts = {
+        "error": sum(1 for item in checks if item.get("level") == "error"),
+        "warn": sum(1 for item in checks if item.get("level") == "warn"),
+        "pass": sum(1 for item in checks if item.get("level") == "pass"),
+        "info": sum(1 for item in checks if item.get("level") == "info"),
+    }
+    status = "error" if counts["error"] else ("warn" if counts["warn"] else "pass")
+    return {
+        "success": True,
+        "path": str(root_path),
+        "profile": profile,
+        "status": status,
+        "summary": counts,
+        "checks": checks,
+        "details": details,
+    }
+
+
+@app.route("/api/training-check/inspect", methods=["POST"])
+def api_training_check_inspect():
+    data = request.get_json() or {}
+    root = (data.get("path") or "").strip()
+    if not root:
+        return jsonify({"error": "path 不能为空"}), 400
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.exists():
+        return jsonify({"error": f"路径不存在: {root_path}"}), 400
+    try:
+        return jsonify(_inspect_training_dataset(root_path))
+    except Exception as e:
+        log.exception("训练可用性检查 inspect 失败")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/training-check/run", methods=["POST"])
+def api_training_check_run():
+    data = request.get_json() or {}
+    root = (data.get("path") or "").strip()
+    if not root:
+        return jsonify({"error": "path 不能为空"}), 400
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.exists():
+        return jsonify({"error": f"路径不存在: {root_path}"}), 400
+    try:
+        report = _run_training_usability_check(
+            root_path,
+            profile=(data.get("profile") or "general"),
+            include_videos=bool(data.get("include_videos", False)),
+            max_issue_examples=int(data.get("max_issue_examples", 5) or 5),
+        )
+        return jsonify(report)
+    except Exception as e:
+        log.exception("训练可用性检查失败")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/merge/inspect", methods=["POST"])
 def api_merge_inspect():
     if _editor is None:
