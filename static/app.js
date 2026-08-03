@@ -301,7 +301,13 @@ function resolveUrdfAssetUrl(url, baseUrl='') {
     if (url.startsWith('data:')) return url;
     if (/^(https?:)?\/\//.test(url) || url.startsWith('/api/urdf_asset/')) return url;
     if (url.startsWith('package://')) {
-        return `${S.urdf.assetRoot}/${url.replace(/^package:\/\//, '')}`;
+        let relPath = url.replace(/^package:\/\//, '');
+        // 如果后端告知 package_name，且路径以 package_name/ 开头，则剥离
+        const pkgName = S.urdf.packageName;
+        if (pkgName && relPath.startsWith(pkgName + '/')) {
+            relPath = relPath.substring(pkgName.length + 1);
+        }
+        return `${S.urdf.assetRoot}/${relPath}`;
     }
 
     const fallbackBase = S.urdf.rootUrl || '/';
@@ -893,6 +899,7 @@ async function loadUrdfRobot(meta) {
     S.urdf.rootUrl = meta.root_url;
     S.urdf.rootDir = meta.root_url.replace(/[^/]*$/, '');
     S.urdf.assetRoot = meta.asset_root;
+    S.urdf.packageName = meta.package_name || null;
     S.urdf.jointInfo = meta.joint_info || {};
     S.urdf.jointNames = meta.movable_joint_names || meta.joint_names || [];
     S.urdf.jointMap = buildUrdfJointMap(S.jointNames, S.urdf.jointNames);
@@ -1799,8 +1806,6 @@ document.addEventListener('DOMContentLoaded',()=>{
     $('btn-del-fr').addEventListener('click',doDeleteFrames);
     $('btn-add-rng').addEventListener('click',addFrameRange);
     $('btn-clr-fr').addEventListener('click',clearFrameSel);
-    $('btn-urdf-file').addEventListener('click',()=>$('urdf-file-input').click());
-    $('btn-urdf-dir').addEventListener('click',()=>$('urdf-dir-input').click());
     $('btn-urdf-server').addEventListener('click', async () => {
         // 创建一个临时的 input 来接收目录浏览器选择的路径
         const tmpId = '_urdf_server_path';
@@ -1847,22 +1852,6 @@ document.addEventListener('DOMContentLoaded',()=>{
     });
     $('btn-urdf-mapping').addEventListener('click',showJointMappingModal);
     $('btn-urdf-reset').addEventListener('click',resetUrdfCamera);
-    $('urdf-file-input').addEventListener('change',async e=>{
-        const files = e.target.files;
-        if (files?.length) {
-            try { await uploadUrdfBundle(files, guessRootUrdf(files)); }
-            catch (_e) {}
-        }
-        e.target.value = '';
-    });
-    $('urdf-dir-input').addEventListener('change',async e=>{
-        const files = e.target.files;
-        if (files?.length) {
-            try { await uploadUrdfBundle(files, guessRootUrdf(files)); }
-            catch (_e) {}
-        }
-        e.target.value = '';
-    });
     $('sel-all').addEventListener('change',e=>toggleSelAll(e.target.checked));
     $('ds-path').addEventListener('keydown',e=>{if(e.key==='Enter')loadDataset();});
     $('merge-path').addEventListener('keydown',e=>{if(e.key==='Enter')addMergeDataset();});

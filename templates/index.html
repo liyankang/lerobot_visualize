@@ -443,9 +443,7 @@
         <button class="bp" id="btn-browse-save" title="浏览目录">&#128193;</button>
         <button class="bs" id="btn-save">另存为</button>
         <div class="sep"></div>
-        <button class="bp" id="btn-urdf-file">上传 URDF</button>
-        <button class="bg" id="btn-urdf-dir">上传 URDF+MESH 目录</button>
-        <button class="bg" id="btn-urdf-server" title="从服务端目录选择 URDF">服务端目录</button>
+        <button class="bg" id="btn-urdf-server" title="从服务端目录选择 URDF">加载 URDF</button>
         <span class="hdr-status" id="urdf-upload-status">未加载 URDF</span>
         <div id="merge-list" class="hdr-merge-list"></div>
     </div>
@@ -579,8 +577,7 @@
 </div>
 
 <div id="tb"></div>
-<input id="urdf-file-input" type="file" accept=".urdf,.xml,.stl,.dae,.obj,.mtl,.png,.jpg,.jpeg" multiple hidden>
-<input id="urdf-dir-input" type="file" webkitdirectory directory multiple hidden>
+<script src="{{ url_for('static', filename='dir_browser.js') }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

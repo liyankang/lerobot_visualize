@@ -4016,8 +4016,49 @@ def api_urdf_load_from_dir():
     else:
         return jsonify({"error": "路径不存在或不是 .urdf 文件/目录"}), 400
 
+    # 读取 URDF 内容，分析 mesh 路径分布
+    try:
+        urdf_text = root_path.read_text(encoding="utf-8")
+    except Exception:
+        urdf_text = root_path.read_text(encoding="utf-8", errors="ignore")
+
+    # 提取所有 mesh filename，判断路径风格
+    import re as _re
+    mesh_paths = _re.findall(r'filename="([^"]+\.(?:stl|STL|dae|DAE|obj|OBJ|glb|GLB|gltf|GLTF))"', urdf_text)
+
+    # 确定 asset 根目录:
+    # - 如果 mesh 路径以 package://xxx/ 开头，需要找到 "xxx" 对应的目录
+    # - 如果是相对路径，asset 根 = urdf 所在目录
+    package_name = None
     package_dir = root_path.parent.resolve()
     root_rel = root_path.relative_to(package_dir).as_posix()
+
+    # 检测 package:// 前缀
+    pkg_prefix = None
+    for mp in mesh_paths:
+        if mp.startswith("package://"):
+            pkg_prefix = mp[len("package://"):].split("/")[0]
+            break
+
+    if pkg_prefix:
+        # 尝试在 urdf 所在目录及其上级目录中找 pkg_prefix 目录
+        search_start = root_path.parent
+        found_pkg_dir = None
+        for candidate in [search_start, search_start.parent, search_start.parent.parent]:
+            if candidate.name == pkg_prefix and candidate.is_dir():
+                found_pkg_dir = candidate.resolve()
+                break
+            child = candidate / pkg_prefix
+            if child.is_dir():
+                found_pkg_dir = child.resolve()
+                break
+
+        if found_pkg_dir:
+            package_dir = found_pkg_dir
+        else:
+            # 如果找不到同名目录，可能 package 名只是占位符
+            # 去掉 package://pkg_name/ 前缀，直接相对于 urdf 所在目录
+            package_name = pkg_prefix
 
     try:
         info = _inspect_urdf(root_path)
@@ -4025,7 +4066,6 @@ def api_urdf_load_from_dir():
         return jsonify({"error": f"URDF 解析失败: {e}"}), 400
 
     package_id = uuid.uuid4().hex
-    # 记录所有文件（用于调试/资源定位）
     all_files = [str(p.relative_to(package_dir).as_posix())
                  for p in package_dir.rglob("*") if p.is_file()]
 
@@ -4033,6 +4073,7 @@ def api_urdf_load_from_dir():
         "dir": package_dir,
         "root_file": root_rel,
         "files": all_files,
+        "package_name": package_name,
         **info,
     }
 
@@ -4046,6 +4087,7 @@ def api_urdf_load_from_dir():
         "joint_info": info.get("joint_info", {}),
         "asset_root": f"/api/urdf_asset/{package_id}",
         "root_url": f"/api/urdf_asset/{package_id}/{root_rel}",
+        "package_name": package_name,
     })
 
 
