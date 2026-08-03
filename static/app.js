@@ -912,11 +912,19 @@ async function loadUrdfRobot(meta) {
     renderUrdfPanel();
 
     const manager = new THREE.LoadingManager();
-    manager.setURLModifier((url) => resolveUrdfAssetUrl(url));
+    manager.setURLModifier((url) => {
+        console.log('[URDF-DEBUG] LoadingManager URL:', url);
+        const resolved = resolveUrdfAssetUrl(url);
+        console.log('[URDF-DEBUG] resolved:', resolved);
+        return resolved;
+    });
 
     const loader = new URDFLoader(manager);
     loader.fetchOptions = { credentials: 'same-origin' };
-    loader.loadMeshCb = createUrdfMeshLoader(manager);
+    loader.loadMeshCb = (path, loadManager, done) => {
+        console.log('[URDF-DEBUG] loadMeshCb path:', path);
+        return createUrdfMeshLoader(manager)(path, loadManager, done);
+    };
 
     const robot = await new Promise((resolve, reject) => {
         loader.load(S.urdf.rootUrl, resolve, undefined, reject);
@@ -1010,6 +1018,29 @@ function detectDegreeMode(source) {
     return S.urdf._detectedDegree;
 }
 
+function getMirroredPrismaticJoints(urdfName, mappedUrdfNames) {
+    const info = S.urdf.jointInfo[urdfName];
+    if (!info || info.type !== 'prismatic') return [];
+    const axis = info.axis || [];
+    const lower = Number(info.lower);
+    const upper = Number(info.upper);
+    if (!Number.isFinite(lower) || !Number.isFinite(upper)) return [];
+    const result = [];
+    for (const [name, other] of Object.entries(S.urdf.jointInfo || {})) {
+        if (name === urdfName || mappedUrdfNames.has(name) || other.type !== 'prismatic') continue;
+        const otherLower = Number(other.lower);
+        const otherUpper = Number(other.upper);
+        if (!Number.isFinite(otherLower) || !Number.isFinite(otherUpper)) continue;
+        if (Math.abs(lower + otherUpper) > 1e-6 || Math.abs(upper + otherLower) > 1e-6) continue;
+        const otherAxis = other.axis || [];
+        const dot = (Number(axis[0]) || 0) * (Number(otherAxis[0]) || 0)
+            + (Number(axis[1]) || 0) * (Number(otherAxis[1]) || 0)
+            + (Number(axis[2]) || 0) * (Number(otherAxis[2]) || 0);
+        if (dot < -0.9) result.push(name);
+    }
+    return result;
+}
+
 function syncUrdfPose() {
     if (!S.urdf.robot || !S.curEpData || !S.curEpData.frames?.length) return;
     const frame = S.curEpData.frames[Math.max(0, Math.min(S.videoFrame, S.curEpData.frames.length - 1))];
@@ -1020,6 +1051,7 @@ function syncUrdfPose() {
 
     const useDeg = detectDegreeMode(source);
     const DEG2RAD = Math.PI / 180;
+    const mappedUrdfNames = new Set(S.urdf.jointMap.map(item => item.urdfName));
 
     for (const mapping of S.urdf.jointMap) {
         const value = source[mapping.datasetIndex];
@@ -1035,6 +1067,9 @@ function syncUrdfPose() {
 
         try {
             S.urdf.robot.setJointValue(mapping.urdfName, finalValue);
+            for (const mirroredName of getMirroredPrismaticJoints(mapping.urdfName, mappedUrdfNames)) {
+                S.urdf.robot.setJointValue(mirroredName, -finalValue);
+            }
         } catch (_e) {}
     }
 }

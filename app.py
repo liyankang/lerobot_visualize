@@ -4008,7 +4008,7 @@ def api_urdf_load_from_dir():
 
     target = Path(raw_path)
     if target.is_dir():
-        urdf_candidates = sorted(target.rglob("*.urdf"))
+        urdf_candidates = sorted(p for p in target.rglob("*.urdf") if not p.name.startswith("_served_"))
         if not urdf_candidates:
             return jsonify({"error": f"目录中未找到 .urdf 文件: {target}"}), 400
         root_path = urdf_candidates[0]
@@ -4028,8 +4028,9 @@ def api_urdf_load_from_dir():
 
     # 确定 package_dir: mesh 文件实际所在的根目录
     package_dir = root_path.parent.resolve()
+
     if has_package_prefix:
-        # 提取 package:// 后的目录名，尝试在上级目录中找到它
+        # package://pkg_name/path 风格
         match = _re.search(r'package://([^/]+)/', urdf_text)
         if match:
             pkg_name = match.group(1)
@@ -4041,16 +4042,44 @@ def api_urdf_load_from_dir():
                 if child.is_dir():
                     package_dir = child.resolve()
                     break
+    else:
+        # 检查是否有 ../ 相对路径（mesh 在 URDF 的上级目录）
+        mesh_matches = _re.findall(r'filename="([^"]+\.(?:stl|STL|dae|DAE|obj|OBJ|glb|GLB|gltf|GLTF))"', urdf_text)
+        if mesh_matches:
+            # 找到最深的公共相对前缀，如 ../meshes/ → URDF 需要放在 package_dir 根
+            max_up = 0
+            for mm in mesh_matches:
+                up_count = mm.count('../')
+                max_up = max(max_up, up_count)
+            if max_up > 0:
+                # 向上找到包含 mesh 文件的目录
+                candidate = root_path.parent
+                for _ in range(max_up):
+                    candidate = candidate.parent
+                package_dir = candidate.resolve()
 
-    # 如果 URDF 使用了 package:// 前缀，生成一份重写的 URDF 副本放在 package_dir 根目录下
-    # 把 package://pkg_name/path 替换为相对路径 path（相对于 package_dir 根）
     final_root_rel = root_path.relative_to(package_dir).as_posix()
-    if has_package_prefix:
-        rewritten = _re.sub(
-            r'filename="package://[^/]+/([^"]+)"',
-            r'filename="\1"',
-            urdf_text,
-        )
+
+    def _rewrite_mesh_filename(match):
+        quote = match.group(1)
+        raw = match.group(2).replace("\\", "/")
+        lower = raw.lower()
+        if not lower.endswith((".stl", ".dae", ".obj", ".glb", ".gltf")):
+            return match.group(0)
+        if raw.startswith(("http://", "https://", "data:")):
+            return match.group(0)
+        if raw.startswith("package://"):
+            rewritten_path = _re.sub(r"^package://[^/]+/", "", raw)
+            return f"filename={quote}{rewritten_path}{quote}"
+        mesh_abs = (root_path.parent / raw).resolve()
+        try:
+            rewritten_path = mesh_abs.relative_to(package_dir).as_posix()
+        except ValueError:
+            rewritten_path = raw
+        return f"filename={quote}{rewritten_path}{quote}"
+
+    rewritten = _re.sub(r'filename=(["\'])([^"\']+)\1', _rewrite_mesh_filename, urdf_text)
+    if rewritten != urdf_text or final_root_rel != root_path.name:
         rewritten_name = f"_served_{root_path.stem}.urdf"
         (package_dir / rewritten_name).write_text(rewritten, encoding="utf-8")
         final_root_rel = rewritten_name
@@ -5321,5 +5350,4 @@ if __name__ == "__main__":
         print(f"  关节配置: {_joint_config_override}")
     print()
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
-
 
