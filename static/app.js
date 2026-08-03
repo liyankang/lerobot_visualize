@@ -1801,6 +1801,39 @@ document.addEventListener('DOMContentLoaded',()=>{
     $('btn-clr-fr').addEventListener('click',clearFrameSel);
     $('btn-urdf-file').addEventListener('click',()=>$('urdf-file-input').click());
     $('btn-urdf-dir').addEventListener('click',()=>$('urdf-dir-input').click());
+    $('btn-urdf-server').addEventListener('click', async () => {
+        // 创建一个临时的 input 来接收目录浏览器选择的路径
+        const tmpId = '_urdf_server_path';
+        let tmpInput = document.getElementById(tmpId);
+        if (!tmpInput) {
+            tmpInput = document.createElement('input');
+            tmpInput.type = 'hidden';
+            tmpInput.id = tmpId;
+            document.body.appendChild(tmpInput);
+        }
+        tmpInput.value = '';
+        await DirBrowser.open(tmpId);
+        const selectedPath = tmpInput.value.trim();
+        if (!selectedPath) return;
+
+        try {
+            updateUrdfUploadStatus('正在加载 3D 组件...');
+            await ensureUrdfRuntime();
+            updateUrdfUploadStatus('正在从服务端加载 URDF...');
+            const resp = await fetch('/api/urdf/load-from-dir', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: selectedPath }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+            await loadUrdfRobot(data);
+            toast(`URDF 已加载: ${data.robot_name}`, 'success');
+        } catch (e) {
+            updateUrdfUploadStatus(`URDF 加载失败: ${e.message}`);
+            toast(e.message, 'error');
+        }
+    });
     $('urdf-source').addEventListener('change',e=>{
         S.urdf.source = e.target.value === 'action' ? 'action' : 'state';
         S.urdf._detectedDegree = null;

@@ -3938,7 +3938,7 @@ def api_urdf_upload():
         return jsonify({"error": "上传文件与清单数量不一致"}), 400
 
     package_id = uuid.uuid4().hex
-    package_dir = Path(tempfile.mkdtemp(prefix=f"urdf_{package_id}_", dir="/tmp"))
+    package_dir = Path(tempfile.mkdtemp(prefix=f"urdf_{package_id}_"))
 
     saved_paths = []
     urdf_candidates = []
@@ -3977,6 +3977,62 @@ def api_urdf_upload():
         "dir": package_dir,
         "root_file": root_rel,
         "files": saved_paths,
+        **info,
+    }
+
+    return jsonify({
+        "success": True,
+        "package_id": package_id,
+        "robot_name": info["robot_name"],
+        "root_file": root_rel,
+        "joint_names": info["joint_names"],
+        "movable_joint_names": info["movable_joint_names"],
+        "joint_info": info.get("joint_info", {}),
+        "asset_root": f"/api/urdf_asset/{package_id}",
+        "root_url": f"/api/urdf_asset/{package_id}/{root_rel}",
+    })
+
+
+@app.route("/api/urdf/load-from-dir", methods=["POST"])
+def api_urdf_load_from_dir():
+    """从服务端目录加载 URDF，无需上传文件。
+
+    请求 JSON: { "path": "/abs/path/to/urdf_dir_or_file" }
+    如果是目录，自动搜索 .urdf 文件；如果是 .urdf 文件，直接使用。
+    """
+    data = request.get_json(silent=True) or {}
+    raw_path = (data.get("path") or "").strip()
+    if not raw_path:
+        return jsonify({"error": "请提供 URDF 目录或文件路径"}), 400
+
+    target = Path(raw_path)
+    if target.is_dir():
+        urdf_candidates = sorted(target.rglob("*.urdf"))
+        if not urdf_candidates:
+            return jsonify({"error": f"目录中未找到 .urdf 文件: {target}"}), 400
+        root_path = urdf_candidates[0]
+    elif target.is_file() and target.suffix.lower() == ".urdf":
+        root_path = target
+    else:
+        return jsonify({"error": "路径不存在或不是 .urdf 文件/目录"}), 400
+
+    package_dir = root_path.parent.resolve()
+    root_rel = root_path.relative_to(package_dir).as_posix()
+
+    try:
+        info = _inspect_urdf(root_path)
+    except Exception as e:
+        return jsonify({"error": f"URDF 解析失败: {e}"}), 400
+
+    package_id = uuid.uuid4().hex
+    # 记录所有文件（用于调试/资源定位）
+    all_files = [str(p.relative_to(package_dir).as_posix())
+                 for p in package_dir.rglob("*") if p.is_file()]
+
+    _urdf_assets[package_id] = {
+        "dir": package_dir,
+        "root_file": root_rel,
+        "files": all_files,
         **info,
     }
 
