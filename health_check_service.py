@@ -510,8 +510,8 @@ class HealthCheckService:
                 progress_cb=lambda *a: None,
             )
 
-            overall = img_report.get("overall", {})
-            avg_score = overall.get("avg_quality_score", 0)
+            overall = img_report.get("summary", {})
+            avg_score = overall.get("quality_score", 0)
             problem_ratio = overall.get("problem_frame_ratio", 0)
 
             issues = []
