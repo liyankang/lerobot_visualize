@@ -1,0 +1,89 @@
+# --- Vibecoding / AI 辅助工具产物 ---
+# Codex (OpenAI) 本地配置/缓存
+.codex/
+.codex
+# Claude / Cursor / Windsurf 等 AI 编辑器私有目录
+.claude/
+.cursor/
+.windsurf/
+.codeium/
+.continue/
+# Trae / 其他 IDE 私有目录
+.trae/
+# AI 会话记录、计划、规格说明等生成物
+AGENTS.md
+CLAUDE.md
+CURSOR.md
+WINDSURF.md
+plan.md
+plan/
+spec.md
+spec/
+tasks.md
+checklist.md
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv/
+.env
+
+# 测试 / 覆盖率
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# --- 日志 / 运行时产物 ---
+*.log
+*.err.log
+*.out.log
+logs/
+pids/
+*.pid
+
+# --- 编辑器 / IDE ---
+.idea/
+.vscode/
+.history/
+*.swp
+*.swo
+*~
+
+# --- 操作系统 ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- 数据 / 临时文件 ---
+*.tmp
+*.bak
+*.cache
