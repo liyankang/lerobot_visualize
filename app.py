@@ -4017,53 +4017,43 @@ def api_urdf_load_from_dir():
     else:
         return jsonify({"error": "路径不存在或不是 .urdf 文件/目录"}), 400
 
-    # 读取 URDF 内容，分析 mesh 路径分布
+    # 读取 URDF 内容
     try:
         urdf_text = root_path.read_text(encoding="utf-8")
     except Exception:
         urdf_text = root_path.read_text(encoding="utf-8", errors="ignore")
 
-    # 提取所有 mesh filename，判断路径风格
     import re as _re
-    mesh_paths = _re.findall(r'filename="([^"]+\.(?:stl|STL|dae|DAE|obj|OBJ|glb|GLB|gltf|GLTF))"', urdf_text)
+    has_package_prefix = 'package://' in urdf_text
 
-    # 确定 asset 根目录:
-    # - 如果 mesh 路径以 package://xxx/ 开头，需要找到 "xxx" 对应的目录
-    # - 如果是相对路径，asset 根 = urdf 所在目录
-    package_name = None
+    # 确定 package_dir: mesh 文件实际所在的根目录
     package_dir = root_path.parent.resolve()
+    if has_package_prefix:
+        # 提取 package:// 后的目录名，尝试在上级目录中找到它
+        match = _re.search(r'package://([^/]+)/', urdf_text)
+        if match:
+            pkg_name = match.group(1)
+            for candidate in [root_path.parent, root_path.parent.parent, root_path.parent.parent.parent]:
+                if candidate.name == pkg_name and candidate.is_dir():
+                    package_dir = candidate.resolve()
+                    break
+                child = candidate / pkg_name
+                if child.is_dir():
+                    package_dir = child.resolve()
+                    break
 
-    # 检测 package:// 前缀
-    pkg_prefix = None
-    for mp in mesh_paths:
-        if mp.startswith("package://"):
-            pkg_prefix = mp[len("package://"):].split("/")[0]
-            break
-
-    if pkg_prefix:
-        # 尝试在 urdf 所在目录及其上级目录中找 pkg_prefix 目录
-        search_start = root_path.parent
-        found_pkg_dir = None
-        for candidate in [search_start, search_start.parent, search_start.parent.parent]:
-            if candidate.name == pkg_prefix and candidate.is_dir():
-                found_pkg_dir = candidate.resolve()
-                break
-            child = candidate / pkg_prefix
-            if child.is_dir():
-                found_pkg_dir = child.resolve()
-                break
-
-        if found_pkg_dir:
-            package_dir = found_pkg_dir
-            # 找到了 package 目录，前端需要剥离 package://pkg_name/ 前缀
-            package_name = pkg_prefix
-        else:
-            # 如果找不到同名目录，可能 package 名只是占位符
-            # 去掉 package://pkg_name/ 前缀，直接相对于 urdf 所在目录
-            package_name = pkg_prefix
-
-    # root_rel 必须基于最终的 package_dir 计算
-    root_rel = root_path.relative_to(package_dir).as_posix()
+    # 如果 URDF 使用了 package:// 前缀，生成一份重写的 URDF 副本放在 package_dir 根目录下
+    # 把 package://pkg_name/path 替换为相对路径 path（相对于 package_dir 根）
+    final_root_rel = root_path.relative_to(package_dir).as_posix()
+    if has_package_prefix:
+        rewritten = _re.sub(
+            r'filename="package://[^/]+/([^"]+)"',
+            r'filename="\1"',
+            urdf_text,
+        )
+        rewritten_name = f"_served_{root_path.stem}.urdf"
+        (package_dir / rewritten_name).write_text(rewritten, encoding="utf-8")
+        final_root_rel = rewritten_name
 
     try:
         info = _inspect_urdf(root_path)
@@ -4071,14 +4061,10 @@ def api_urdf_load_from_dir():
         return jsonify({"error": f"URDF 解析失败: {e}"}), 400
 
     package_id = uuid.uuid4().hex
-    all_files = [str(p.relative_to(package_dir).as_posix())
-                 for p in package_dir.rglob("*") if p.is_file()]
 
     _urdf_assets[package_id] = {
         "dir": package_dir,
-        "root_file": root_rel,
-        "files": all_files,
-        "package_name": package_name,
+        "root_file": final_root_rel,
         **info,
     }
 
@@ -4086,13 +4072,13 @@ def api_urdf_load_from_dir():
         "success": True,
         "package_id": package_id,
         "robot_name": info["robot_name"],
-        "root_file": root_rel,
+        "root_file": final_root_rel,
         "joint_names": info["joint_names"],
         "movable_joint_names": info["movable_joint_names"],
         "joint_info": info.get("joint_info", {}),
         "asset_root": f"/api/urdf_asset/{package_id}",
-        "root_url": f"/api/urdf_asset/{package_id}/{root_rel}",
-        "package_name": package_name,
+        "root_url": f"/api/urdf_asset/{package_id}/{final_root_rel}",
+        "package_name": None,
     })
 
 
