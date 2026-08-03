@@ -253,6 +253,7 @@
         <div class="input-row">
             <label>数据集路径</label>
             <input id="dataset-path" type="text" placeholder="/abs/path/to/lerobot_dataset">
+            <button class="dir-browse-btn" data-target="dataset-path" title="浏览目录" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;cursor:pointer;font-size:14px;">&#128193;</button>
             <button id="inspect-btn" class="btn secondary">扫描</button>
         </div>
         <div class="input-row">
@@ -302,6 +303,7 @@
     </section>
 </main>
 
+<script src="/static/dir_browser.js"></script>
 <script src="/static/training_check.js"></script>
 </body>
 </html>

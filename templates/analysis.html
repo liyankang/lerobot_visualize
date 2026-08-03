@@ -652,6 +652,7 @@
             <p>输入 LeRobot v2.1 数据集路径后，页面会按关节组生成标准化的关节报告。当前默认展示每个来源的位值图和速度图，便于后续把任何数据集拉出来直接跑一遍、快速看时序质量。</p>
             <div class="input-row">
                 <input id="dataset-path" class="path-input" type="text" placeholder="例如: /data/lerobot/my_dataset">
+                <button class="dir-browse-btn" data-target="dataset-path" title="浏览目录">&#128193;</button>
                 <button id="analyze-btn" class="primary-btn">开始分析</button>
             </div>
             <div id="smooth-actions-panel" class="smooth-actions hidden">
@@ -687,6 +688,7 @@
         </section>
     </main>
 
+    <script src="{{ url_for('static', filename='dir_browser.js') }}"></script>
     <script src="{{ url_for('static', filename='analysis_app.js') }}"></script>
 </body>
 </html>
