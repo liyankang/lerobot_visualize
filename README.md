@@ -13,6 +13,10 @@
 | 图像质量分析 | `/image-analysis` | 分析视频帧的模糊度、亮度、曝光、信息熵、帧间一致性及关节速度-模糊度关联 |
 | ROS2 Bag 转换 | `/ros2-convert` | 将 ROS2 bag 转换为 LeRobot v2.1 格式 |
 | LeRobot 版本转换 | `/converter` | 在 LeRobot 数据集 v2.0 / v2.1 / v3.0 之间互转，附带目录对比 |
+| 训练可用性检查 | `/training-check` | 训练前检查字段 shape、数值类型、task 文本、stats 等，拦截 dataloader 错误 |
+| **数据集健康度评分** | `/health-check` | **一键体检 7 大维度，生成 0-100 综合评分与问题清单** |
+| 批量数据裁剪 | `/batch-tools` | 按 episode 长度删除过短/过长数据，裁掉静止帧 |
+| Stats 准确性校验 | `/verify-stats` | 重算 per-feature 统计量与 stats.json 交叉比对 |
 
 ---
 
@@ -301,6 +305,44 @@ Episode 质量评分取所有帧的均值。
    - **问题帧列表** — 被标记异常的帧及其原因
    - **关节速度-模糊度散点图** — 高速运动时图像是否模糊
 
+---
+
+## 工具六: 数据集健康度评分
+
+一键体检 LeRobot v2.1 数据集，从 7 个维度加权计算 0-100 的综合健康度评分（A-F 等级），生成可展开的维度卡片和问题清单，帮助快速判断数据集是否「可以送训练」。
+
+### 评分维度
+
+| 维度 | 权重 | 说明 |
+|------|------|------|
+| 完整性一致性 | 20% | 视频 fps / 帧数 / 时长与 parquet 数据的一致性检查 |
+| 轨迹平滑性 | 20% | 关节加速度突变 (spike ratio)，越高说明轨迹越抖 |
+| 元数据完整性 | 15% | info/episodes/tasks/stats 文件是否齐全，episode 与 parquet 数量是否一致 |
+| 分布覆盖度 | 15% | state/action 的 1σ、2σ 覆盖率，判断数据多样性 |
+| 物理约束 | 10% | 关节角度 / 速度超限比例（需 joint_config.json 提供 limit） |
+| 时间对齐 | 10% | timestamp jitter + state-action lag correlation |
+| 图像质量 | 10% | 模糊度 / 亮度 / 曝光 / 信息熵综合分（可选） |
+
+### 评分等级
+
+| 等级 | 分数区间 | 含义 |
+|------|----------|------|
+| A | 85-100 | 优秀，可直接用于训练 |
+| B | 70-84 | 良好，少量问题不影响训练 |
+| C | 55-69 | 一般，建议修复部分维度 |
+| D | 40-54 | 较差，存在明显问题 |
+| F | 0-39 | 不合格，需要大幅修正 |
+
+### 使用流程
+
+1. 访问 `/health-check`
+2. 输入数据集路径
+3. （可选）勾选是否包含图像质量分析，设置采样 episode 数量
+4. 点击「开始体检」，等待 7 个维度依次检查
+5. 查看综合评分仪表盘
+6. 展开维度卡片查看子分数、问题列表和明细数据
+7. 根据问题清单定位具体问题
+
 ## 项目结构
 
 ```
@@ -309,13 +351,19 @@ lerobot_visualize/
 ├── image_analyzer.py       # 图像质量分析核心: 逐帧解码 + 指标计算 + 评分
 ├── ros2_converter.py       # ROS2 Bag 转换核心: 扫描/解析/对齐/转换
 ├── lerobot_converter.py    # LeRobot 版本转换核心: v2.0 / v2.1 / v3.0 互转 + 目录对比
+├── training_check_service.py  # 训练可用性检查核心
+├── stats_verify_service.py    # Stats 准确性校验核心
+├── health_check_service.py    # 数据集健康度评分核心: 7 维度加权聚合
 ├── templates/
 │   ├── portal.html         # 工具箱门户首页
 │   ├── index.html          # 可视化编辑器页面
 │   ├── analysis.html       # 数据分析页面
 │   ├── image_analysis.html # 图像质量分析页面
 │   ├── ros2_convert.html   # ROS2 Bag 转换页面
-│   └── converter.html      # LeRobot 版本转换页面
+│   ├── converter.html      # LeRobot 版本转换页面
+│   ├── training_check.html # 训练可用性检查页面
+│   ├── health_check.html   # 数据集健康度评分页面
+│   └── verify_stats.html   # Stats 校验页面
 ├── static/
 │   ├── app.js              # 可视化编辑器前端 (Three.js + urdf-loader + Chart.js)
 │   ├── analysis_app.js     # 数据分析页前端

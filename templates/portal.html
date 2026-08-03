@@ -52,6 +52,7 @@
         .card .icon-image { background: linear-gradient(135deg, #a855f7, #6366f1); }
         .card .icon-batch { background: linear-gradient(135deg, #0f766e, #2563eb); }
         .card .icon-training { background: linear-gradient(135deg, #1d4ed8, #059669); }
+        .card .icon-health { background: linear-gradient(135deg, #059669, #34d399); }
 
         .card h2 { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
         .card p { font-size: 13px; color: #666; line-height: 1.6; }
@@ -168,6 +169,17 @@
             </div>
             <h2>训练可用性检查</h2>
             <p>训练前检查数据集结构、字段 shape、数值类型、task 文本、timestamp/FPS、stats/q 值和 action 异常，提前拦截 dataloader 与策略预处理错误。</p>
+            <span class="badge badge-ready">可用</span>
+        </a>
+
+        <a class="card" href="/health-check">
+            <div class="icon icon-health">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+                </svg>
+            </div>
+            <h2>数据集健康度评分</h2>
+            <p>一键体检 7 大维度（完整性、平滑性、分布覆盖、物理约束、时间对齐、图像质量、元数据），生成 0-100 综合评分与问题清单。</p>
             <span class="badge badge-ready">可用</span>
         </a>
 

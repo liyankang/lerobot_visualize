@@ -41,6 +41,7 @@ import image_analyzer as img_analyzer
 import dataset_batch_tools as batch_tools
 from training_check_service import TrainingCheckService
 from stats_verify_service import StatsVerifyService
+from health_check_service import HealthCheckService
 
 # ═══════════════════════ 配置 ═══════════════════════
 
@@ -3449,6 +3450,12 @@ _training_check_service = TrainingCheckService(
     log,
 )
 _stats_verify_service = StatsVerifyService()
+_health_check_service = HealthCheckService(
+    DatasetEditor,
+    lambda: globals().get("_joint_config_override"),
+    image_analyzer_cls=img_analyzer.ImageAnalyzer,
+    logger=log,
+)
 
 @app.route("/")
 def portal():
@@ -3717,6 +3724,129 @@ def api_training_check_fix():
     except Exception as e:
         log.exception("训练数据集格式修复失败")
         return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════ 数据集健康度评分 API ═══════════════════════
+
+_health_progress_lock = threading.Lock()
+_health_progress: dict = {
+    "running": False,
+    "stage": "",
+    "title": "",
+    "detail": "",
+    "current": 0,
+    "total": 0,
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+    "result": None,
+}
+
+
+def _set_health_progress(**kwargs):
+    with _health_progress_lock:
+        _health_progress.update(kwargs)
+
+
+def _health_progress_cb(stage, title, current, total):
+    with _health_progress_lock:
+        _health_progress["stage"] = stage
+        _health_progress["title"] = title
+        _health_progress["current"] = int(current)
+        _health_progress["total"] = int(total)
+
+
+def _get_health_progress():
+    with _health_progress_lock:
+        data = dict(_health_progress)
+    total = max(0, int(data.get("total", 0) or 0))
+    current = max(0, int(data.get("current", 0) or 0))
+    data["percent"] = max(0, min(100, round(current * 100 / total))) if total > 0 else 0
+    started_at = data.get("started_at")
+    finished_at = data.get("finished_at")
+    if started_at:
+        end = finished_at or time.time()
+        data["elapsed_sec"] = max(0.0, end - started_at)
+    return data
+
+
+@app.route("/health-check")
+def health_check_page():
+    return render_template("health_check.html")
+
+
+@app.route("/api/health-check/run", methods=["POST"])
+def api_health_check_run():
+    data = request.get_json() or {}
+    root = (data.get("path") or "").strip()
+    if not root:
+        return jsonify({"error": "path 不能为空"}), 400
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.exists():
+        return jsonify({"error": f"路径不存在: {root_path}"}), 400
+
+    include_image = bool(data.get("include_image_quality", True))
+    image_samples = int(data.get("image_sample_episodes", 3) or 3)
+
+    with _health_progress_lock:
+        if _health_progress.get("running"):
+            return jsonify({"error": "已有健康度检查任务在进行中"}), 400
+        _health_progress.clear()
+        _health_progress.update({
+            "running": True,
+            "stage": "init",
+            "title": "初始化",
+            "detail": "",
+            "current": 0,
+            "total": 7,
+            "started_at": time.time(),
+            "finished_at": None,
+            "error": None,
+            "result": None,
+        })
+
+    def worker():
+        try:
+            report = _health_check_service.run_health_check(
+                root_path,
+                include_image_quality=include_image,
+                image_sample_episodes=image_samples,
+                progress_cb=_health_progress_cb,
+            )
+            _set_health_progress(
+                running=False,
+                finished_at=time.time(),
+                stage="done",
+                title="健康度检查完成",
+                result=report,
+            )
+        except Exception as e:
+            log.exception("健康度检查失败")
+            _set_health_progress(
+                running=False,
+                finished_at=time.time(),
+                error=str(e),
+                stage="error",
+                title="检查失败",
+                detail=str(e),
+            )
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"success": True, "message": "健康度检查任务已启动"})
+
+
+@app.route("/api/health-check/progress")
+def api_health_check_progress():
+    return jsonify(_get_health_progress())
+
+
+@app.route("/api/health-check/cancel", methods=["POST"])
+def api_health_check_cancel():
+    _set_health_progress(
+        running=False, finished_at=time.time(),
+        error="用户取消", stage="cancelled", title="已取消",
+    )
+    return jsonify({"success": True})
 
 
 @app.route("/api/merge/inspect", methods=["POST"])

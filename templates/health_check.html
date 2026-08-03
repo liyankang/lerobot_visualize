@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>数据集健康度评分 - LeRobot 工具箱</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f3f4f6; color: #1f2937; min-height: 100vh;
+        }
+        header {
+            background: #111827; color: #f9fafb;
+            padding: 14px 24px; display: flex; align-items: center; gap: 16px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.22);
+        }
+        header a { color: #cbd5e1; text-decoration: none; font-size: 13px; }
+        header a:hover { color: #fff; }
+        header h1 { font-size: 16px; font-weight: 650; }
+        header .spacer { flex: 1; }
+        header .version { color: #94a3b8; font-size: 12px; }
+        main { width: min(1280px, calc(100vw - 32px)); margin: 18px auto 32px; }
+        .panel {
+            background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+            padding: 18px; margin-bottom: 14px;
+            box-shadow: 0 1px 4px rgba(15,23,42,0.05);
+        }
+        .panel h2 { font-size: 15px; margin-bottom: 10px; }
+        .panel .desc { color: #6b7280; font-size: 13px; line-height: 1.6; margin-bottom: 12px; }
+        .input-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .input-row label { min-width: 86px; color: #4b5563; font-size: 13px; }
+        .input-row input[type="text"] {
+            flex: 1; min-width: 300px; padding: 8px 12px;
+            border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px;
+        }
+        .input-row input[type="number"] {
+            width: 80px; padding: 8px 12px;
+            border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px;
+        }
+        .input-row .checkbox-group {
+            display: flex; align-items: center; gap: 6px; font-size: 13px; color: #4b5563;
+        }
+        .btn {
+            padding: 8px 20px; border: none; border-radius: 6px;
+            font-size: 13px; cursor: pointer; font-weight: 500;
+        }
+        .btn-primary { background: #2563eb; color: #fff; }
+        .btn-primary:hover { background: #1d4ed8; }
+        .btn-primary:disabled { background: #93c5fd; cursor: not-allowed; }
+        .btn-secondary { background: #e5e7eb; color: #374151; }
+        .btn-secondary:hover { background: #d1d5db; }
+
+        /* 进度条 */
+        .progress-bar-container {
+            width: 100%; height: 8px; background: #e5e7eb;
+            border-radius: 4px; overflow: hidden; margin-top: 10px;
+        }
+        .progress-bar-fill {
+            height: 100%; background: linear-gradient(90deg, #2563eb, #06b6d4);
+            transition: width 0.3s; width: 0%;
+        }
+        .progress-text { font-size: 12px; color: #6b7280; margin-top: 6px; }
+
+        /* 总分仪表盘 */
+        .score-board {
+            display: flex; align-items: center; gap: 40px;
+            padding: 32px; flex-wrap: wrap; justify-content: center;
+        }
+        .score-circle {
+            width: 180px; height: 180px; border-radius: 50%;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            border: 8px solid; position: relative;
+        }
+        .score-circle .score-value {
+            font-size: 52px; font-weight: 800; line-height: 1;
+        }
+        .score-circle .score-label {
+            font-size: 13px; margin-top: 6px; font-weight: 500;
+        }
+        .score-grade-box { display: flex; flex-direction: column; gap: 8px; }
+        .score-grade-box .grade-letter {
+            font-size: 64px; font-weight: 900; line-height: 1;
+        }
+        .score-grade-box .grade-desc { font-size: 18px; font-weight: 600; }
+        .score-grade-box .grade-info { font-size: 13px; color: #6b7280; max-width: 280px; line-height: 1.5; }
+
+        .dataset-summary {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px; width: 100%; margin-top: 16px;
+        }
+        .summary-item {
+            background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;
+            padding: 12px;
+        }
+        .summary-item .label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; }
+        .summary-item .value { font-size: 16px; font-weight: 600; margin-top: 4px; }
+
+        /* 维度卡片 */
+        .dimensions-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+            gap: 14px;
+        }
+        .dim-card {
+            border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px;
+            background: #fff; position: relative;
+        }
+        .dim-card .dim-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .dim-card .dim-title { font-size: 14px; font-weight: 600; }
+        .dim-card .dim-weight { font-size: 11px; color: #9ca3af; }
+        .dim-card .dim-score-row {
+            display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+        }
+        .dim-card .dim-score {
+            font-size: 24px; font-weight: 700; min-width: 56px;
+        }
+        .dim-card .dim-bar {
+            flex: 1; height: 6px; background: #f3f4f6; border-radius: 3px; overflow: hidden;
+        }
+        .dim-card .dim-bar-fill { height: 100%; border-radius: 3px; }
+        .dim-card.level-good .dim-bar-fill { background: #10b981; }
+        .dim-card.level-good .dim-score { color: #10b981; }
+        .dim-card.level-warn .dim-bar-fill { background: #f59e0b; }
+        .dim-card.level-warn .dim-score { color: #f59e0b; }
+        .dim-card.level-bad .dim-bar-fill { background: #ef4444; }
+        .dim-card.level-bad .dim-score { color: #ef4444; }
+        .dim-card.level-skip .dim-bar-fill { background: #d1d5db; }
+        .dim-card.level-skip .dim-score { color: #9ca3af; }
+        .dim-card .dim-issues { margin-top: 8px; }
+        .dim-card .dim-issues li {
+            font-size: 12px; color: #6b7280; margin-bottom: 4px; list-style: none;
+            padding-left: 14px; position: relative; line-height: 1.5;
+        }
+        .dim-card .dim-issues li::before {
+            content: "•"; position: absolute; left: 0; color: #f59e0b; font-weight: bold;
+        }
+        .dim-card .dim-detail {
+            margin-top: 8px; font-size: 12px; color: #4b5563;
+            background: #f9fafb; border-radius: 6px; padding: 8px 10px;
+        }
+        .dim-card .dim-detail .detail-row {
+            display: flex; justify-content: space-between; padding: 2px 0;
+        }
+        .dim-card .dim-detail .detail-row .key { color: #6b7280; }
+        .dim-card .dim-detail .detail-row .val { font-weight: 500; }
+        .dim-card .badge {
+            display: inline-block; padding: 2px 8px; border-radius: 10px;
+            font-size: 11px; font-weight: 600;
+        }
+        .badge-good { background: #d1fae5; color: #065f46; }
+        .badge-warn { background: #fef3c7; color: #92400e; }
+        .badge-bad { background: #fee2e2; color: #991b1b; }
+        .badge-skip { background: #f3f4f6; color: #6b7280; }
+
+        /* 问题列表 */
+        .issues-list {
+            list-style: none;
+        }
+        .issues-list li {
+            padding: 10px 12px; border-left: 3px solid #f59e0b;
+            background: #fffbeb; border-radius: 0 6px 6px 0;
+            margin-bottom: 6px; font-size: 13px;
+        }
+        .issues-list li .issue-dim {
+            display: inline-block; padding: 1px 8px; border-radius: 8px;
+            background: #e0e7ff; color: #3730a3; font-size: 11px; font-weight: 600;
+            margin-right: 8px;
+        }
+        .no-issues {
+            text-align: center; padding: 24px; color: #10b981; font-size: 15px; font-weight: 600;
+        }
+
+        .hidden { display: none !important; }
+        .error-msg {
+            background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;
+            padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <a href="/">← 返回</a>
+        <h1>数据集健康度评分</h1>
+        <div class="spacer"></div>
+        <span class="version">综合多维度体检报告</span>
+    </header>
+
+    <main>
+        <!-- 输入面板 -->
+        <div class="panel">
+            <h2>数据集路径</h2>
+            <p class="desc">输入 LeRobot v2.1 数据集根目录，一键体检 7 大维度，生成综合健康度评分报告。</p>
+            <div class="input-row">
+                <label>路径</label>
+                <input type="text" id="datasetPath" placeholder="/path/to/lerobot/dataset">
+                <div class="checkbox-group">
+                    <input type="checkbox" id="includeImage" checked>
+                    <label for="includeImage" style="min-width:auto">包含图像质量</label>
+                </div>
+                <label>采样 episode</label>
+                <input type="number" id="imageSamples" value="3" min="1" max="20">
+                <button class="btn btn-primary" id="runBtn">开始体检</button>
+            </div>
+            <div id="errorMsg" class="error-msg hidden"></div>
+            <div id="progressSection" class="hidden">
+                <div class="progress-bar-container">
+                    <div class="progress-bar-fill" id="progressBar"></div>
+                </div>
+                <div class="progress-text" id="progressText">准备中...</div>
+            </div>
+        </div>
+
+        <!-- 结果区域 -->
+        <div id="resultSection" class="hidden">
+            <!-- 总分仪表盘 -->
+            <div class="panel">
+                <h2>综合健康度</h2>
+                <div class="score-board">
+                    <div class="score-circle" id="scoreCircle">
+                        <div class="score-value" id="scoreValue">--</div>
+                        <div class="score-label">总分 / 100</div>
+                    </div>
+                    <div class="score-grade-box">
+                        <div class="grade-letter" id="gradeLetter">--</div>
+                        <div class="grade-desc" id="gradeDesc">--</div>
+                        <div class="grade-info" id="gradeInfo">基于完整性、平滑性、覆盖度、约束、对齐、图像质量等多维度加权评分</div>
+                    </div>
+                    <div class="dataset-summary" id="datasetSummary"></div>
+                </div>
+            </div>
+
+            <!-- 维度卡片 -->
+            <div class="panel">
+                <h2>维度详情</h2>
+                <p class="desc">每个维度独立评分，颜色表示等级：绿色=优秀 / 黄色=警告 / 红色=较差 / 灰色=未检测</p>
+                <div class="dimensions-grid" id="dimensionsGrid"></div>
+            </div>
+
+            <!-- 问题清单 -->
+            <div class="panel">
+                <h2>问题清单 (<span id="issueCount">0</span>)</h2>
+                <div id="issuesContainer"></div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+    (function() {
+        const DIMENSION_LABELS = {
+            integrity: "完整性一致性",
+            completeness: "元数据完整性",
+            smoothness: "轨迹平滑性",
+            coverage: "分布覆盖度",
+            constraint: "物理约束",
+            alignment: "时间对齐",
+            image_quality: "图像质量",
+        };
+
+        let pollTimer = null;
+
+        const $ = id => document.getElementById(id);
+
+        function showError(msg) {
+            const el = $("errorMsg");
+            el.textContent = msg;
+            el.classList.remove("hidden");
+        }
+        function hideError() { $("errorMsg").classList.add("hidden"); }
+
+        async function startCheck() {
+            hideError();
+            const path = $("datasetPath").value.trim();
+            if (!path) { showError("请输入数据集路径"); return; }
+
+            $("runBtn").disabled = true;
+            $("progressSection").classList.remove("hidden");
+            $("resultSection").classList.add("hidden");
+            $("progressBar").style.width = "0%";
+            $("progressText").textContent = "正在启动检查...";
+
+            try {
+                const resp = await fetch("/api/health-check/run", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        path: path,
+                        include_image_quality: $("includeImage").checked,
+                        image_sample_episodes: parseInt($("imageSamples").value) || 3,
+                    }),
+                });
+                const data = await resp.json();
+                if (!resp.ok || data.error) {
+                    throw new Error(data.error || "启动检查失败");
+                }
+                startPolling();
+            } catch (e) {
+                showError(e.message);
+                $("runBtn").disabled = false;
+                $("progressSection").classList.add("hidden");
+            }
+        }
+
+        function startPolling() {
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(async () => {
+                try {
+                    const resp = await fetch("/api/health-check/progress");
+                    const data = await resp.json();
+                    updateProgress(data);
+                    if (!data.running) {
+                        clearInterval(pollTimer);
+                        pollTimer = null;
+                        $("runBtn").disabled = false;
+                        if (data.error && data.stage !== "cancelled") {
+                            showError(data.error);
+                        } else if (data.result) {
+                            renderResult(data.result);
+                        }
+                    }
+                } catch (e) { /* ignore poll errors */ }
+            }, 800);
+        }
+
+        function updateProgress(data) {
+            const pct = data.percent || 0;
+            $("progressBar").style.width = pct + "%";
+            const elapsed = data.elapsed_sec != null ? `(${data.elapsed_sec.toFixed(1)}s)` : "";
+            $("progressText").textContent = `${data.title || ""} — ${data.detail || ""} ${pct}% ${elapsed}`;
+        }
+
+        function renderResult(report) {
+            $("progressSection").classList.add("hidden");
+            $("resultSection").classList.remove("hidden");
+
+            // 总分
+            const score = report.overall_score;
+            $("scoreValue").textContent = score.toFixed(0);
+            $("gradeLetter").textContent = report.grade;
+            $("gradeLetter").style.color = report.grade_color;
+            $("gradeDesc").textContent = report.grade_label;
+            $("gradeDesc").style.color = report.grade_color;
+
+            const circle = $("scoreCircle");
+            circle.style.borderColor = report.grade_color;
+            circle.style.color = report.grade_color;
+
+            // 数据集摘要
+            const summary = report.dataset_summary || {};
+            const summaryItems = [
+                {label: "Episodes", value: summary.total_episodes},
+                {label: "Frames", value: summary.total_frames},
+                {label: "FPS", value: summary.fps},
+                {label: "Robot", value: summary.robot_type},
+                {label: "Cameras", value: (summary.cameras || []).join(", ") || "—"},
+            ];
+            $("datasetSummary").innerHTML = summaryItems.map(item =>
+                `<div class="summary-item">
+                    <div class="label">${item.label}</div>
+                    <div class="value">${item.value}</div>
+                </div>`
+            ).join("");
+
+            // 维度卡片
+            const weights = report.weights || {};
+            const dims = report.dimensions || {};
+            $("dimensionsGrid").innerHTML = Object.keys(DIMENSION_LABELS).map(key => {
+                const dim = dims[key];
+                if (!dim) return "";
+                const scoreVal = dim.score != null ? dim.score.toFixed(1) : "N/A";
+                const level = dim.level || "skip";
+                const barWidth = dim.score != null ? dim.score : 0;
+                const weightPct = ((weights[key] || 0) * 100).toFixed(0);
+                const issuesHtml = (dim.issues || []).map(i => `<li>${i}</li>`).join("");
+
+                // 详情行
+                let detailHtml = "";
+                if (dim.detail) {
+                    const rows = Object.entries(dim.detail).filter(([k, v]) =>
+                        v != null && typeof v !== "object"
+                    ).slice(0, 5);
+                    if (rows.length) {
+                        detailHtml = `<div class="dim-detail">${
+                            rows.map(([k, v]) =>
+                                `<div class="detail-row"><span class="key">${k}</span><span class="val">${v}</span></div>`
+                            ).join("")
+                        }</div>`;
+                    }
+                }
+
+                return `<div class="dim-card level-${level}">
+                    <div class="dim-header">
+                        <span class="dim-title">${DIMENSION_LABELS[key]}</span>
+                        <span class="badge badge-${level}">${level.toUpperCase()}</span>
+                    </div>
+                    <div class="dim-score-row">
+                        <div class="dim-score">${scoreVal}</div>
+                        <div class="dim-bar"><div class="dim-bar-fill" style="width:${barWidth}%"></div></div>
+                        <div class="dim-weight">权重 ${weightPct}%</div>
+                    </div>
+                    <ul class="dim-issues">${issuesHtml}</ul>
+                    ${detailHtml}
+                </div>`;
+            }).join("");
+
+            // 问题列表
+            const issues = report.issues || [];
+            $("issueCount").textContent = issues.length;
+            if (issues.length === 0) {
+                $("issuesContainer").innerHTML = `<div class="no-issues">未发现明显问题</div>`;
+            } else {
+                $("issuesContainer").innerHTML = `<ul class="issues-list">${
+                    issues.map(i => `<li><span class="issue-dim">${DIMENSION_LABELS[i.dimension] || i.dimension}</span>${i.message}</li>`).join("")
+                }</ul>`;
+            }
+        }
+
+        $("runBtn").addEventListener("click", startCheck);
+        $("datasetPath").addEventListener("keydown", e => {
+            if (e.key === "Enter") startCheck();
+        });
+    })();
+    </script>
+</body>
+</html>
