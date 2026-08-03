@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 ROS2 Bag 扫描、解析、对齐、转换核心模块。
 

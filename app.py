@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 LeRobot v2.1 数据集可视化编辑器
 
@@ -4031,7 +4032,6 @@ def api_urdf_load_from_dir():
     # - 如果是相对路径，asset 根 = urdf 所在目录
     package_name = None
     package_dir = root_path.parent.resolve()
-    root_rel = root_path.relative_to(package_dir).as_posix()
 
     # 检测 package:// 前缀
     pkg_prefix = None
@@ -4055,10 +4055,15 @@ def api_urdf_load_from_dir():
 
         if found_pkg_dir:
             package_dir = found_pkg_dir
+            # 找到了 package 目录，前端需要剥离 package://pkg_name/ 前缀
+            package_name = pkg_prefix
         else:
             # 如果找不到同名目录，可能 package 名只是占位符
             # 去掉 package://pkg_name/ 前缀，直接相对于 urdf 所在目录
             package_name = pkg_prefix
+
+    # root_rel 必须基于最终的 package_dir 计算
+    root_rel = root_path.relative_to(package_dir).as_posix()
 
     try:
         info = _inspect_urdf(root_path)

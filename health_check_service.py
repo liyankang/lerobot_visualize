@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 LeRobot 数据集健康度评分服务
 
@@ -9,8 +10,6 @@ LeRobot 数据集健康度评分服务
     - app.DatasetEditor: 关节统计 / 平滑性 / 约束 / 时间对齐
     - image_analyzer.ImageAnalyzer: 图像质量指标 (可选)
 """
-
-from __future__ import annotations
 
 import json
 import logging

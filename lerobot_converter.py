@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """LeRobot 数据集版本转换核心模块
 
@@ -8,8 +9,6 @@
 
 格式细节参考 docs/lerobot_format_conversion.md。
 """
-
-from __future__ import annotations
 
 import copy
 import json
