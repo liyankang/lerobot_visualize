@@ -38,6 +38,12 @@
         input:focus, select:focus { outline: none; border-color: #1f7aec; box-shadow: 0 0 0 2px rgba(31,122,236,0.12); }
         .field { margin-bottom: 12px; }
         .path-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+        .browse-icon {
+            height: 34px; width: 38px; padding: 0; border: 1px solid #cfd8df;
+            border-radius: 6px; background: #fff; cursor: pointer; font-size: 16px;
+            display: flex; align-items: center; justify-content: center; color: #52616d;
+        }
+        .browse-icon:hover { background: #f0f4f8; border-color: #1f7aec; color: #1f7aec; }
         .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
         .check {
             display: flex; align-items: center; gap: 8px; margin: 4px 0 12px;
@@ -187,14 +193,14 @@
                     <label for="input-path">输入数据集路径</label>
                     <div class="path-row">
                         <input id="input-path" type="text" placeholder="D:\path\dataset">
-                        <button class="secondary" id="input-browse" type="button">浏览</button>
+                        <button class="browse-icon" id="input-browse" type="button" title="浏览目录">&#128193;</button>
                     </div>
                 </div>
                 <div class="field">
                     <label for="output-path">输出数据集路径</label>
                     <div class="path-row">
                         <input id="output-path" type="text" placeholder="D:\path\dataset_filtered">
-                        <button class="secondary" id="output-browse" type="button">浏览</button>
+                        <button class="browse-icon" id="output-browse" type="button" title="浏览目录">&#128193;</button>
                     </div>
                 </div>
             </div>
