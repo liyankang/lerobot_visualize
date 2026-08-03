@@ -1850,6 +1850,9 @@ document.addEventListener('DOMContentLoaded',()=>{
             tmpInput.id = tmpId;
             document.body.appendChild(tmpInput);
         }
+        try {
+            tmpInput.value = localStorage.getItem('lerobot-visualize-last-urdf-path') || '';
+        } catch (_e) {}
         const selectedPath = await DirBrowser.open(tmpId);
         if (!selectedPath) return;
 
@@ -1865,6 +1868,9 @@ document.addEventListener('DOMContentLoaded',()=>{
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             await loadUrdfRobot(data);
+            try {
+                localStorage.setItem('lerobot-visualize-last-urdf-path', selectedPath);
+            } catch (_e) {}
             toast(`URDF 已加载: ${data.robot_name}`, 'success');
         } catch (e) {
             updateUrdfUploadStatus(`URDF 加载失败: ${e.message}`);
