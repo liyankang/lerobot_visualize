@@ -915,7 +915,6 @@ async function loadUrdfRobot(meta) {
     manager.setURLModifier((url) => resolveUrdfAssetUrl(url));
 
     const loader = new URDFLoader(manager);
-    loader.packages = `${S.urdf.assetRoot}/`;
     loader.fetchOptions = { credentials: 'same-origin' };
     loader.loadMeshCb = createUrdfMeshLoader(manager);
 
