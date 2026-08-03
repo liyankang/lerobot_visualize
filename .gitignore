@@ -43,6 +43,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.pyc
 
 # 虚拟环境
 venv/
