@@ -1816,9 +1816,7 @@ document.addEventListener('DOMContentLoaded',()=>{
             tmpInput.id = tmpId;
             document.body.appendChild(tmpInput);
         }
-        tmpInput.value = '';
-        await DirBrowser.open(tmpId);
-        const selectedPath = tmpInput.value.trim();
+        const selectedPath = await DirBrowser.open(tmpId);
         if (!selectedPath) return;
 
         try {

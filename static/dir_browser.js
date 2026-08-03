@@ -91,31 +91,33 @@ window.DirBrowser = (function () {
     /**
      * 打开目录浏览器弹窗。
      * @param {string} targetInputId - 目标 input 元素的 id
+     * @returns {Promise<string|null>} 用户选择的路径，取消则返回 null
      */
-    async function open(targetInputId) {
+    function open(targetInputId) {
         const inputEl = document.getElementById(targetInputId);
         if (!inputEl) {
             console.error(`DirBrowser: 找不到目标 input #${targetInputId}`);
-            return;
+            return Promise.resolve(null);
         }
 
-        _injectStyles();
+        return new Promise((resolve) => {
+            _injectStyles();
 
-        let currentPath = (inputEl.value || '').trim();
-        const overlay = document.createElement('div');
-        overlay.className = 'dir-browser-overlay';
+            let currentPath = (inputEl.value || '').trim();
+            const overlay = document.createElement('div');
+            overlay.className = 'dir-browser-overlay';
 
-        const card = document.createElement('div');
-        card.className = 'dir-browser-card';
+            const card = document.createElement('div');
+            card.className = 'dir-browser-card';
 
-        // Header
-        const header = document.createElement('div');
-        header.className = 'dir-browser-header';
-        header.innerHTML = '<h3>\ud83d\udcc1 选择目录</h3>';
-        const closeBtn = document.createElement('button');
+            // Header
+            const header = document.createElement('div');
+            header.className = 'dir-browser-header';
+            header.innerHTML = '<h3>\ud83d\udcc1 选择目录</h3>';
+            const closeBtn = document.createElement('button');
         closeBtn.className = 'dir-browser-close';
         closeBtn.innerHTML = '&times;';
-        closeBtn.addEventListener('click', () => overlay.remove());
+        closeBtn.addEventListener('click', () => { overlay.remove(); resolve(null); });
         header.appendChild(closeBtn);
 
         // Body
@@ -159,7 +161,7 @@ window.DirBrowser = (function () {
         const cancelBtn = document.createElement('button');
         cancelBtn.className = 'dir-browser-btn dir-browser-btn-cancel';
         cancelBtn.textContent = '\u53d6\u6d88';
-        cancelBtn.addEventListener('click', () => overlay.remove());
+        cancelBtn.addEventListener('click', () => { overlay.remove(); resolve(null); });
 
         const confirmBtn = document.createElement('button');
         confirmBtn.className = 'dir-browser-btn dir-browser-btn-confirm';
@@ -167,6 +169,7 @@ window.DirBrowser = (function () {
         confirmBtn.addEventListener('click', () => {
             inputEl.value = currentPath;
             overlay.remove();
+            resolve(currentPath);
         });
 
         footer.appendChild(cancelBtn);
@@ -177,7 +180,7 @@ window.DirBrowser = (function () {
         card.appendChild(footer);
         overlay.appendChild(card);
 
-        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
         document.body.appendChild(overlay);
 
         async function render(path) {
@@ -185,7 +188,6 @@ window.DirBrowser = (function () {
             if (data.error) {
                 listEl.innerHTML = `<div class="dir-browser-empty">\u26a0\ufe0f ${_escHtml(data.error)}</div>`;
                 if (path) {
-                    // 尝试回退到根
                     const rootData = await _fetchDirs('');
                     if (!rootData.error) return render('');
                 }
@@ -208,7 +210,8 @@ window.DirBrowser = (function () {
             }
         }
 
-        await render(currentPath);
+        render(currentPath);
+        });
     }
 
     /**
