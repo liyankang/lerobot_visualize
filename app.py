@@ -4489,6 +4489,71 @@ def api_field_editor_preview_assign():
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/field_editor/preview_rename_names", methods=["POST"])
+def api_field_editor_preview_rename_names():
+    """dry-run：预览修改维度名效果，不写盘。"""
+    try:
+        data = request.get_json() or {}
+        editor = _load_field_editor(data)
+        field_name = str(data.get("field_name", "")).strip()
+        new_names = data.get("new_names") or []
+        if isinstance(new_names, str):
+            new_names = [s.strip() for s in new_names.split(",") if s.strip()]
+        if not field_name:
+            return jsonify({"error": "请指定字段名"}), 400
+        if not new_names:
+            return jsonify({"error": "请提供新的维度名列表"}), 400
+        result = field_editor.preview_rename_names(editor, field_name, new_names)
+        return jsonify({"success": True, "result": result})
+    except Exception as e:
+        log.exception("维度名预览失败")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/field_editor/rename_names", methods=["POST"])
+def api_field_editor_rename_names():
+    """修改维度名并保存到新目录。"""
+    data = request.get_json() or {}
+    output_path = str(data.get("output_path", "")).strip()
+    if not output_path:
+        return jsonify({"error": "请指定输出数据集路径"}), 400
+    try:
+        input_path = Path(str(data.get("input_path", "")).strip()).resolve()
+        out_path = Path(output_path).resolve()
+        if input_path == out_path:
+            return jsonify({"error": "输出路径不能和输入路径相同，请另存为新目录"}), 400
+
+        editor = _load_field_editor(data)
+        field_name = str(data.get("field_name", "")).strip()
+        new_names = data.get("new_names") or []
+        if isinstance(new_names, str):
+            new_names = [s.strip() for s in new_names.split(",") if s.strip()]
+        if not field_name:
+            return jsonify({"error": "请指定字段名"}), 400
+        if not new_names:
+            return jsonify({"error": "请提供新的维度名列表"}), 400
+
+        set_save_progress("prepare", "正在修改维度名", f"修改 {field_name}", 0, 1, True)
+        result = field_editor.apply_rename_names(editor, field_name, new_names)
+        editor.save_as(
+            str(out_path),
+            set_save_progress,
+            skip_video_stats=bool(data.get("skip_video_stats", False)),
+        )
+        stats_keys = _read_saved_stats_keys(out_path)
+        set_save_progress("done", "保存完成", f"数据集已保存到: {out_path}", 1, 1, False)
+        return jsonify({
+            "success": True,
+            "path": str(out_path),
+            "result": result,
+            "stats_keys": stats_keys,
+        })
+    except Exception as e:
+        set_save_progress("error", "修改维度名失败", str(e), 0, 0, False)
+        log.exception("修改维度名失败")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/field_editor/rename", methods=["POST"])
 def api_field_editor_rename():
     """重命名字段并保存到新目录。"""

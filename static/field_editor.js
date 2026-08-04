@@ -216,6 +216,15 @@ function buildBodyForActiveTab() {
             if (!renames.length) throw new Error('请至少填写一组重命名规则');
             return { ...common, renames, rename_names: $('rename-names').checked };
         }
+        case 'names': {
+            const field = $('names-field').value.trim();
+            if (!field) throw new Error('请填写要修改维度名的字段');
+            const namesText = $('names-list').value.trim();
+            if (!namesText) throw new Error('请填写新的维度名');
+            const newNames = namesText.split(',').map((s) => s.trim()).filter(Boolean);
+            if (newNames.length === 0) throw new Error('维度名不能为空');
+            return { ...common, field_name: field, new_names: newNames };
+        }
         case 'add': {
             const name = $('add-name').value.trim();
             if (!name) throw new Error('请填写字段名');
@@ -266,6 +275,7 @@ function buildBodyForActiveTab() {
 
 const DRY_RUN_URL = {
     rename: '/api/field_editor/preview_rename',
+    names: '/api/field_editor/preview_rename_names',
     add: '/api/field_editor/preview_add',
     delete: '/api/field_editor/preview_delete',
     assign: '/api/field_editor/preview_assign',
@@ -398,6 +408,41 @@ function renderDeleteDiff(result) {
     `;
 }
 
+function renderNamesDiff(result) {
+    const field = result.field || '?';
+    const dim = result.dim || 0;
+    const oldNames = result.old_names || [];
+    const newNames = result.new_names || [];
+    const lines = [];
+    lines.push(`✓ 将修改字段 ${field} 的 ${dim} 个维度名`);
+    if (!oldNames.length) {
+        lines.push('  原数据没有维度名，将新增');
+    } else if (oldNames.length !== newNames.length) {
+        lines.push(`  ⚠ 原维度数(${oldNames.length})与新维度数(${newNames.length})不一致`);
+    }
+    const pairs = Math.max(oldNames.length, newNames.length);
+    for (let i = 0; i < pairs; i++) {
+        const o = oldNames[i] !== undefined ? oldNames[i] : '(空)';
+        const n = newNames[i] !== undefined ? newNames[i] : '(空)';
+        const mark = o === n ? '  ' : '→';
+        lines.push(`  [${i}] ${o} ${mark} ${n}`);
+    }
+
+    return `
+        <div class="dry-run-summary">${esc(lines.join('\n'))}</div>
+        <div class="sample-compare">
+            <div class="sample-block before">
+                <h4>修改前 ${esc(field)} 维度名</h4>
+                <div class="sample-list">${oldNames.length ? esc(oldNames.join(', ')) : '<span class="sample-empty">无</span>'}</div>
+            </div>
+            <div class="sample-block after">
+                <h4>修改后 ${esc(field)} 维度名</h4>
+                <div class="sample-list">${newNames.length ? esc(newNames.join(', ')) : '<span class="sample-empty">无</span>'}</div>
+            </div>
+        </div>
+    `;
+}
+
 function renderAssignDiff(result) {
     const target = result.target || '?';
     const before = result.before_rows || [];
@@ -428,6 +473,7 @@ function renderAssignDiff(result) {
 
 const DIFF_RENDERERS = {
     rename: renderRenameDiff,
+    names: renderNamesDiff,
     add: renderAddDiff,
     delete: renderDeleteDiff,
     assign: renderAssignDiff,
@@ -486,6 +532,7 @@ async function run() {
 
     const RUN_URL = {
         rename: '/api/field_editor/rename',
+        names: '/api/field_editor/rename_names',
         add: '/api/field_editor/add',
         delete: '/api/field_editor/delete',
         assign: '/api/field_editor/assign',
@@ -582,6 +629,23 @@ $('browse-ok').addEventListener('click', () => {
         $(browseTarget).value = $('browse-input').value.trim() || $('browse-current').textContent.trim();
     }
     $('browse-modal').classList.remove('active');
+});
+
+$('names-load-current').addEventListener('click', () => {
+    const field = $('names-field').value.trim();
+    if (!field) { status('请先填写要修改的字段名', 'error'); return; }
+    const f = (currentFeatures || []).find((x) => x.key === field);
+    if (!f) { status(`字段 ${field} 不在当前列表，请先点"加载字段列表"`, 'error'); return; }
+    const names = (f.names && f.names.length) ? f.names : [];
+    const dim = (f.shape && f.shape.length) ? f.shape[f.shape.length - 1] : 1;
+    if (names.length) {
+        $('names-list').value = names.join(', ');
+    } else if (dim > 1) {
+        $('names-list').value = Array.from({ length: dim }, (_, i) => `dim_${i}`).join(', ');
+    } else {
+        $('names-list').value = '';
+    }
+    status(`已载入 ${names.length || dim} 个维度名，可直接修改`, 'ok');
 });
 
 updateAssignModeFields();

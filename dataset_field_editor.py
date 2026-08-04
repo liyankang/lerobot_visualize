@@ -191,6 +191,58 @@ def preview_assign(editor: Any, target: str, *, mode: str = "constant", value: A
         _restore_editor(editor, snap)
 
 
+def apply_rename_names(
+    editor: Any,
+    field_name: str,
+    new_names: List[str],
+) -> Dict[str, Any]:
+    """修改某个向量字段的维度名（info.features[field].names）。
+
+    - field_name 必须存在且 shape 最后一维 >= 1。
+    - new_names 长度必须等于维度数。
+    - 同时规范化 names 写法为一维 list[str]（兼容原来的 list[list] / dict）。
+    """
+    field_name = (field_name or "").strip()
+    if not field_name:
+        raise ValueError("字段名不能为空")
+    features: Dict[str, Any] = editor.info.setdefault("features", {})
+    if field_name not in features:
+        raise ValueError(f"字段 {field_name} 不存在")
+
+    shape = list(features[field_name].get("shape") or [1])
+    dim = int(shape[-1]) if shape else 1
+    if dim <= 0:
+        raise ValueError(f"字段 {field_name} 的 shape 非法: {shape}")
+    if len(new_names) != dim:
+        raise ValueError(
+            f"维度名数量 {len(new_names)} 与字段维度 {dim} 不匹配"
+        )
+    # 去空白 + 转字符串
+    normalized = [str(n or "").strip() for n in new_names]
+
+    old_names = _normalize_names(features[field_name].get("names"))
+    features[field_name]["names"] = normalized
+    editor.modified = True
+    return {
+        "field": field_name,
+        "dim": dim,
+        "old_names": old_names or [],
+        "new_names": normalized,
+    }
+
+
+def preview_rename_names(editor: Any, field_name: str, new_names: List[str]) -> Dict[str, Any]:
+    """dry-run：在 editor 副本上修改维度名，返回前后对比。"""
+    snap = _snapshot_editor(editor)
+    try:
+        result = apply_rename_names(editor, field_name, new_names)
+        result["fields_before"] = snap_features(snap)
+        result["fields_after"] = list_features(editor)
+        return result
+    finally:
+        _restore_editor(editor, snap)
+
+
 def snap_features(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
     """从 snapshot（只含 info/episode_data）里重建 features 快照。
 

@@ -244,6 +244,7 @@
 
             <div class="tabs">
                 <div class="tab active" data-tab="rename">重命名</div>
+                <div class="tab" data-tab="names">维度名</div>
                 <div class="tab" data-tab="add">添加字段</div>
                 <div class="tab" data-tab="delete">删除字段</div>
                 <div class="tab" data-tab="assign">批量赋值</div>
@@ -264,6 +265,20 @@
                     同步替换 features.names 内的旧字段名（适用于 joint_*.pos）
                 </label>
                 <div class="help-text">提示：可一次填多组重命名；系统会同步更新 info.features 和所有 parquet 列名。</div>
+            </div>
+
+            <div class="pane" id="pane-names">
+                <div class="field">
+                    <label for="names-field">要修改维度名的字段</label>
+                    <input id="names-field" type="text" placeholder="如 action 或 observation.state">
+                    <div class="help-text">先点上方"加载字段列表"查看当前维度名，再在此填写。</div>
+                </div>
+                <div class="field">
+                    <label for="names-list">新的维度名（逗号分隔，数量必须等于 shape 最后一维）</label>
+                    <textarea id="names-list" placeholder="如 joint_1, joint_2, joint_3, joint_4, joint_5, joint_6, gripper"></textarea>
+                    <div class="help-text">例如 action 是 7 维向量，就填 7 个名字，逗号分隔。</div>
+                </div>
+                <button class="mini-btn" id="names-load-current" type="button">从当前字段载入维度名</button>
             </div>
 
             <div class="pane" id="pane-add">
