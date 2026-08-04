@@ -40,6 +40,7 @@ except ImportError:
 
 import image_analyzer as img_analyzer
 import dataset_batch_tools as batch_tools
+import dataset_field_editor as field_editor
 from training_check_service import TrainingCheckService
 from stats_verify_service import StatsVerifyService
 from health_check_service import HealthCheckService
@@ -3488,6 +3489,11 @@ def batch_tools_page():
     return render_template("batch_tools.html")
 
 
+@app.route("/field-editor")
+def field_editor_page():
+    return render_template("field_editor.html")
+
+
 @app.route("/image-analysis")
 def image_analysis_page():
     return render_template("image_analysis.html")
@@ -4366,6 +4372,227 @@ def api_batch_tools_run():
     except Exception as e:
         set_save_progress("error", "批处理执行失败", str(e), 0, 0, False)
         log.exception("批处理执行失败")
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════ 字段编辑器 API ═══════════════════════
+
+def _load_field_editor(data):
+    """从请求中构造 DatasetEditor（不写盘，用于 preview / dry-run）。"""
+    input_path = str(data.get("input_path", "")).strip()
+    if not input_path:
+        raise ValueError("请指定输入数据集路径")
+    return DatasetEditor(input_path)
+
+
+@app.route("/api/field_editor/preview", methods=["POST"])
+def api_field_editor_preview():
+    """返回当前数据集所有字段的预览信息。"""
+    try:
+        editor = _load_field_editor(request.get_json() or {})
+        result = field_editor.build_preview(editor)
+        return jsonify({"success": True, **result})
+    except Exception as e:
+        log.exception("字段编辑器预览失败")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/field_editor/rename", methods=["POST"])
+def api_field_editor_rename():
+    """重命名字段并保存到新目录。"""
+    data = request.get_json() or {}
+    output_path = str(data.get("output_path", "")).strip()
+    if not output_path:
+        return jsonify({"error": "请指定输出数据集路径"}), 400
+    try:
+        input_path = Path(str(data.get("input_path", "")).strip()).resolve()
+        out_path = Path(output_path).resolve()
+        if input_path == out_path:
+            return jsonify({"error": "输出路径不能和输入路径相同，请另存为新目录"}), 400
+
+        editor = _load_field_editor(data)
+        renames = field_editor.parse_rename_pairs(data.get("renames"))
+        if not renames:
+            return jsonify({"error": "未提供有效的重命名规则"}), 400
+
+        set_save_progress("prepare", "正在重命名字段", "应用重命名规则...", 0, 1, True)
+        result = field_editor.apply_rename(
+            editor,
+            renames,
+            rename_names=bool(data.get("rename_names", True)),
+        )
+        if not result["applied"]:
+            set_save_progress("error", "重命名失败", "没有可应用的重命名", 0, 0, False)
+            return jsonify({
+                "error": "没有字段被重命名",
+                "detail": result["skipped"],
+            }), 400
+
+        editor.save_as(
+            str(out_path),
+            set_save_progress,
+            skip_video_stats=bool(data.get("skip_video_stats", False)),
+        )
+        stats_keys = _read_saved_stats_keys(out_path)
+        set_save_progress("done", "保存完成", f"数据集已保存到: {out_path}", 1, 1, False)
+        return jsonify({
+            "success": True,
+            "path": str(out_path),
+            "result": result,
+            "stats_keys": stats_keys,
+        })
+    except Exception as e:
+        set_save_progress("error", "重命名执行失败", str(e), 0, 0, False)
+        log.exception("字段重命名失败")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/field_editor/add", methods=["POST"])
+def api_field_editor_add():
+    """添加新字段并保存到新目录。"""
+    data = request.get_json() or {}
+    output_path = str(data.get("output_path", "")).strip()
+    if not output_path:
+        return jsonify({"error": "请指定输出数据集路径"}), 400
+    try:
+        input_path = Path(str(data.get("input_path", "")).strip()).resolve()
+        out_path = Path(output_path).resolve()
+        if input_path == out_path:
+            return jsonify({"error": "输出路径不能和输入路径相同，请另存为新目录"}), 400
+
+        editor = _load_field_editor(data)
+        shape_raw = data.get("shape")
+        if shape_raw in ("", None):
+            shape = None
+        elif isinstance(shape_raw, list):
+            shape = [int(x) for x in shape_raw if x not in ("", None)]
+        else:
+            shape = [int(shape_raw)]
+
+        set_save_progress("prepare", "正在添加字段", f"添加 {data.get('field_name')}", 0, 1, True)
+        result = field_editor.apply_add(
+            editor,
+            str(data.get("field_name", "")).strip(),
+            dtype=str(data.get("dtype", "float32") or "float32"),
+            shape=shape,
+            default=data.get("default", 0.0),
+            names=data.get("names"),
+        )
+        editor.save_as(
+            str(out_path),
+            set_save_progress,
+            skip_video_stats=bool(data.get("skip_video_stats", False)),
+        )
+        stats_keys = _read_saved_stats_keys(out_path)
+        set_save_progress("done", "保存完成", f"数据集已保存到: {out_path}", 1, 1, False)
+        return jsonify({
+            "success": True,
+            "path": str(out_path),
+            "result": result,
+            "stats_keys": stats_keys,
+        })
+    except Exception as e:
+        set_save_progress("error", "添加字段失败", str(e), 0, 0, False)
+        log.exception("添加字段失败")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/field_editor/delete", methods=["POST"])
+def api_field_editor_delete():
+    """删除字段并保存到新目录。"""
+    data = request.get_json() or {}
+    output_path = str(data.get("output_path", "")).strip()
+    if not output_path:
+        return jsonify({"error": "请指定输出数据集路径"}), 400
+    try:
+        input_path = Path(str(data.get("input_path", "")).strip()).resolve()
+        out_path = Path(output_path).resolve()
+        if input_path == out_path:
+            return jsonify({"error": "输出路径不能和输入路径相同，请另存为新目录"}), 400
+
+        editor = _load_field_editor(data)
+        field_names = data.get("field_names") or []
+        if isinstance(field_names, str):
+            field_names = [field_names]
+        if not field_names:
+            return jsonify({"error": "未指定要删除的字段"}), 400
+
+        set_save_progress("prepare", "正在删除字段", "应用删除...", 0, 1, True)
+        result = field_editor.apply_delete(
+            editor,
+            [str(f).strip() for f in field_names if str(f).strip()],
+            allow_delete_protected=bool(data.get("allow_delete_protected", False)),
+        )
+        if not result["deleted"]:
+            set_save_progress("error", "删除失败", "没有可删除的字段", 0, 0, False)
+            return jsonify({
+                "error": "没有字段被删除",
+                "detail": result["skipped"],
+            }), 400
+
+        editor.save_as(
+            str(out_path),
+            set_save_progress,
+            skip_video_stats=bool(data.get("skip_video_stats", False)),
+        )
+        stats_keys = _read_saved_stats_keys(out_path)
+        set_save_progress("done", "保存完成", f"数据集已保存到: {out_path}", 1, 1, False)
+        return jsonify({
+            "success": True,
+            "path": str(out_path),
+            "result": result,
+            "stats_keys": stats_keys,
+        })
+    except Exception as e:
+        set_save_progress("error", "删除字段失败", str(e), 0, 0, False)
+        log.exception("删除字段失败")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/field_editor/assign", methods=["POST"])
+def api_field_editor_assign():
+    """批量给字段赋值并保存到新目录。"""
+    data = request.get_json() or {}
+    output_path = str(data.get("output_path", "")).strip()
+    if not output_path:
+        return jsonify({"error": "请指定输出数据集路径"}), 400
+    try:
+        input_path = Path(str(data.get("input_path", "")).strip()).resolve()
+        out_path = Path(output_path).resolve()
+        if input_path == out_path:
+            return jsonify({"error": "输出路径不能和输入路径相同，请另存为新目录"}), 400
+
+        editor = _load_field_editor(data)
+        ep_indices = data.get("episode_indices")
+        if ep_indices and isinstance(ep_indices, list):
+            ep_indices = [int(i) for i in ep_indices]
+
+        set_save_progress("prepare", "正在批量赋值", f"赋值 {data.get('target')}", 0, 1, True)
+        result = field_editor.apply_assign(
+            editor,
+            str(data.get("target", "")).strip(),
+            mode=str(data.get("mode", "constant") or "constant"),
+            value=data.get("value"),
+            source=data.get("source"),
+            expression=data.get("expression"),
+            episode_indices=ep_indices,
+        )
+        editor.save_as(
+            str(out_path),
+            set_save_progress,
+            skip_video_stats=bool(data.get("skip_video_stats", False)),
+        )
+        stats_keys = _read_saved_stats_keys(out_path)
+        set_save_progress("done", "保存完成", f"数据集已保存到: {out_path}", 1, 1, False)
+        return jsonify({
+            "success": True,
+            "path": str(out_path),
+            "result": result,
+            "stats_keys": stats_keys,
+        })
+    except Exception as e:
+        set_save_progress("error", "批量赋值失败", str(e), 0, 0, False)
+        log.exception("批量赋值失败")
         return jsonify({"error": str(e)}), 500
 
 

@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>字段编辑器 - LeRobot 工具箱</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f4f6f8; color: #263238; min-height: 100vh;
+        }
+        header {
+            height: 52px; background: #17202a; color: #eef3f7;
+            display: flex; align-items: center; gap: 16px; padding: 0 22px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.22);
+        }
+        header a { color: #b8c4ce; text-decoration: none; font-size: 13px; }
+        header a:hover { color: #fff; }
+        header h1 { font-size: 16px; font-weight: 650; }
+        main {
+            max-width: 1180px; margin: 0 auto; padding: 22px;
+            display: grid; grid-template-columns: 460px 1fr; gap: 18px;
+        }
+        section {
+            background: #fff; border: 1px solid #e2e7ec; border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(20,40,60,0.05);
+        }
+        .form { padding: 18px; max-height: calc(100vh - 110px); overflow-y: auto; }
+        .form h2, .result h2 { font-size: 15px; margin-bottom: 14px; }
+        .group { border-top: 1px solid #edf1f4; padding-top: 14px; margin-top: 14px; }
+        .group:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+        label { display: block; font-size: 12px; font-weight: 650; color: #52616d; margin-bottom: 6px; }
+        input[type="text"], input[type="number"], select, textarea {
+            width: 100%; padding: 7px 10px; border: 1px solid #cfd8df;
+            border-radius: 6px; font-size: 13px; color: #263238; background: #fff;
+            font-family: inherit;
+        }
+        input { height: 34px; }
+        textarea { min-height: 60px; resize: vertical; font-family: Consolas, monospace; }
+        input:focus, select:focus, textarea:focus {
+            outline: none; border-color: #1f7aec; box-shadow: 0 0 0 2px rgba(31,122,236,0.12);
+        }
+        .field { margin-bottom: 12px; }
+        .path-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+        .browse-icon {
+            height: 34px; width: 38px; padding: 0; border: 1px solid #cfd8df;
+            border-radius: 6px; background: #fff; cursor: pointer; font-size: 16px;
+            display: flex; align-items: center; justify-content: center; color: #52616d;
+        }
+        .browse-icon:hover { background: #f0f4f8; border-color: #1f7aec; color: #1f7aec; }
+        .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .check {
+            display: flex; align-items: center; gap: 8px; margin: 4px 0 12px;
+            font-size: 13px; color: #37474f;
+        }
+        .check input { width: 16px; height: 16px; }
+        .tabs {
+            display: flex; gap: 4px; margin-bottom: 14px;
+            border-bottom: 1px solid #e2e7ec;
+        }
+        .tab {
+            padding: 8px 14px; cursor: pointer; font-size: 13px; font-weight: 650;
+            color: #52616d; border-bottom: 2px solid transparent; margin-bottom: -1px;
+        }
+        .tab.active { color: #1f7aec; border-bottom-color: #1f7aec; }
+        .pane { display: none; }
+        .pane.active { display: block; }
+        .actions { display: flex; gap: 10px; margin-top: 16px; }
+        button {
+            height: 34px; padding: 0 14px; border: 0; border-radius: 6px;
+            font-size: 13px; font-weight: 650; cursor: pointer;
+        }
+        .primary { background: #1f7aec; color: #fff; }
+        .secondary { background: #e8edf2; color: #263238; }
+        button:disabled { opacity: 0.55; cursor: not-allowed; }
+        .result { padding: 18px; min-height: 540px; }
+        .stat-row {
+            display: flex; gap: 14px; margin-bottom: 14px; flex-wrap: wrap;
+        }
+        .stat-chip {
+            border: 1px solid #e2e7ec; border-radius: 7px; padding: 8px 14px;
+            background: #fafbfc; font-size: 12px; color: #52616d;
+        }
+        .stat-chip b { display: block; color: #263238; font-size: 16px; margin-bottom: 2px; }
+        table.fields {
+            width: 100%; border-collapse: collapse; font-size: 12px;
+        }
+        table.fields th, table.fields td {
+            padding: 8px 10px; border-bottom: 1px solid #edf1f4; text-align: left;
+            vertical-align: top;
+        }
+        table.fields th {
+            background: #f6f8fa; color: #52616d; font-weight: 650;
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        .key-cell {
+            font-family: Consolas, monospace; font-size: 12px; color: #17202a;
+            word-break: break-all;
+        }
+        .badge {
+            display: inline-block; padding: 1px 7px; border-radius: 10px;
+            font-size: 10px; font-weight: 650;
+        }
+        .badge-protected { background: #fff3e0; color: #e65100; }
+        .badge-image { background: #f3e5f5; color: #7b1fa2; }
+        .badge-vector { background: #e3f2fd; color: #1565c0; }
+        .badge-scalar { background: #f1f8e9; color: #558b2f; }
+        .sample-cell {
+            font-family: Consolas, monospace; font-size: 11px; color: #52616d;
+            max-width: 260px; word-break: break-all;
+        }
+        .empty { color: #78909c; font-size: 13px; padding: 18px 0; }
+        .status {
+            margin-top: 14px; padding: 10px 12px; border-radius: 6px;
+            background: #eef6ff; color: #145ea8; font-size: 13px; display: none;
+            white-space: pre-line;
+        }
+        .status.error { background: #fff1f0; color: #b42318; }
+        .status.ok { background: #ecfdf3; color: #067647; }
+        .progress-box {
+            display: none; margin-top: 14px; border: 1px solid #d9e3ec;
+            border-radius: 8px; background: #fafcff; padding: 12px;
+        }
+        .progress-title { font-size: 13px; font-weight: 700; color: #263238; }
+        .progress-detail { font-size: 12px; color: #60717f; margin-top: 4px; min-height: 18px; }
+        .progress-track {
+            margin-top: 10px; height: 10px; border-radius: 999px;
+            background: #e7edf3; overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%; width: 0%; background: #1f7aec; transition: width 0.2s ease;
+        }
+        .progress-meta { font-size: 11px; color: #60717f; margin-top: 6px; text-align: right; }
+        .rename-row {
+            display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 6px;
+            align-items: center; margin-bottom: 8px;
+        }
+        .rename-row .arrow { color: #1f7aec; font-weight: 700; padding: 0 2px; }
+        .rename-row .del-btn {
+            height: 34px; width: 34px; padding: 0; background: #fff1f0;
+            color: #b42318; border: 1px solid #f5c2c0; border-radius: 6px; cursor: pointer;
+            font-size: 16px; line-height: 1;
+        }
+        .add-btn, .mini-btn {
+            height: 30px; padding: 0 10px; background: #eef6ff; color: #145ea8;
+            border: 1px solid #c5dcf6; border-radius: 6px; cursor: pointer;
+            font-size: 12px; font-weight: 650;
+        }
+        .add-btn:hover, .mini-btn:hover { background: #dcebff; }
+        .help-text { font-size: 11px; color: #78909c; margin-top: 4px; line-height: 1.5; }
+        .modal-backdrop {
+            display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.46);
+            z-index: 1000; align-items: center; justify-content: center; padding: 18px;
+        }
+        .modal-backdrop.active { display: flex; }
+        .modal {
+            width: min(760px, 96vw); max-height: 86vh; background: #fff;
+            border-radius: 8px; border: 1px solid #d9e3ec; padding: 16px;
+            display: flex; flex-direction: column; box-shadow: 0 18px 50px rgba(0,0,0,0.22);
+        }
+        .modal h3 { font-size: 15px; margin-bottom: 10px; }
+        .current {
+            font-family: Consolas, monospace; font-size: 12px; color: #52616d;
+            background: #f6f8fa; border: 1px solid #e2e7ec; border-radius: 6px;
+            padding: 8px; margin-bottom: 10px; word-break: break-all;
+        }
+        .dir-list {
+            min-height: 220px; max-height: 430px; overflow: auto; border: 1px solid #e2e7ec;
+            border-radius: 6px; background: #fbfcfd; padding: 6px;
+        }
+        .dir-item {
+            padding: 8px 10px; border-radius: 5px; cursor: pointer; font-size: 13px;
+        }
+        .dir-item:hover { background: #eaf2ff; }
+        .dir-item.parent { color: #1f7aec; font-weight: 650; }
+        @media (max-width: 940px) {
+            main { grid-template-columns: 1fr; padding: 14px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <a href="/">← 工具箱</a>
+        <h1>字段编辑器</h1>
+    </header>
+
+    <main>
+        <section class="form">
+            <h2>字段编辑器</h2>
+            <div class="group">
+                <div class="field">
+                    <label for="input-path">输入数据集路径</label>
+                    <div class="path-row">
+                        <input id="input-path" type="text" placeholder="D:\path\dataset">
+                        <button class="browse-icon" id="input-browse" type="button" title="浏览目录">&#128193;</button>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="output-path">输出数据集路径</label>
+                    <div class="path-row">
+                        <input id="output-path" type="text" placeholder="D:\path\dataset_renamed">
+                        <button class="browse-icon" id="output-browse" type="button" title="浏览目录">&#128193;</button>
+                    </div>
+                </div>
+                <div class="field">
+                    <button class="secondary" id="preview-btn" style="width:100%;">加载字段列表</button>
+                </div>
+            </div>
+
+            <div class="tabs">
+                <div class="tab active" data-tab="rename">重命名</div>
+                <div class="tab" data-tab="add">添加字段</div>
+                <div class="tab" data-tab="delete">删除字段</div>
+                <div class="tab" data-tab="assign">批量赋值</div>
+            </div>
+
+            <div class="pane active" id="pane-rename">
+                <div id="rename-list">
+                    <div class="rename-row">
+                        <input type="text" class="rn-old" placeholder="原字段名 (如 joint_1.pos)">
+                        <span class="arrow">→</span>
+                        <input type="text" class="rn-new" placeholder="新字段名 (如 action)">
+                        <button class="del-btn" type="button" title="删除此行">×</button>
+                    </div>
+                </div>
+                <button class="add-btn" id="add-rename-row" type="button" style="margin-top:6px;">+ 添加一行</button>
+                <label class="check" style="margin-top:12px;">
+                    <input id="rename-names" type="checkbox" checked>
+                    同步替换 features.names 内的旧字段名（适用于 joint_*.pos）
+                </label>
+                <div class="help-text">提示：可一次填多组重命名；系统会同步更新 info.features 和所有 parquet 列名。</div>
+            </div>
+
+            <div class="pane" id="pane-add">
+                <div class="field">
+                    <label for="add-name">字段名</label>
+                    <input id="add-name" type="text" placeholder="如 sensor.temperature">
+                </div>
+                <div class="split">
+                    <div class="field">
+                        <label for="add-dtype">dtype</label>
+                        <select id="add-dtype">
+                            <option value="float32">float32</option>
+                            <option value="float64">float64</option>
+                            <option value="int32">int32</option>
+                            <option value="int64">int64</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="add-shape">shape (最后一维)</label>
+                        <input id="add-shape" type="number" min="1" value="1">
+                        <div class="help-text">1 表示标量；&gt;1 表示向量</div>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="add-default">默认值</label>
+                    <input id="add-default" type="text" placeholder="标量填数字，向量填逗号分隔 (如 0,0,1)">
+                </div>
+                <div class="field">
+                    <label for="add-names">维度名称 (可选)</label>
+                    <input id="add-names" type="text" placeholder="如 x,y,z；留空不设置">
+                </div>
+            </div>
+
+            <div class="pane" id="pane-delete">
+                <div class="field">
+                    <label>要删除的字段（每行一个）</label>
+                    <textarea id="delete-names" placeholder="sensor.temperature&#10;debug.flag"></textarea>
+                </div>
+                <label class="check">
+                    <input id="allow-delete-protected" type="checkbox">
+                    允许删除 observation.state / action（会让训练检查失败，慎用）
+                </label>
+                <div class="help-text">提示：frame_index、timestamp、index、episode_index、task_index 等系统列不可删除。</div>
+            </div>
+
+            <div class="pane" id="pane-assign">
+                <div class="field">
+                    <label for="assign-target">目标字段</label>
+                    <input id="assign-target" type="text" placeholder="如 action 或 sensor.temp">
+                </div>
+                <div class="field">
+                    <label for="assign-mode">赋值方式</label>
+                    <select id="assign-mode">
+                        <option value="constant">常量（整列设为固定值）</option>
+                        <option value="copy">从其他字段复制</option>
+                        <option value="expr">表达式（对某字段做算术）</option>
+                    </select>
+                </div>
+                <div class="field" id="assign-constant-field">
+                    <label for="assign-value">常量值</label>
+                    <input id="assign-value" type="text" placeholder="标量填 0；向量填 0,0,0">
+                </div>
+                <div class="field" id="assign-source-field" style="display:none;">
+                    <label for="assign-source">源字段</label>
+                    <input id="assign-source" type="text" placeholder="如 observation.state">
+                </div>
+                <div class="field" id="assign-expr-field" style="display:none;">
+                    <label for="assign-expr">表达式</label>
+                    <input id="assign-expr" type="text" placeholder="如 x * 0.5 或 x + 1.0">
+                    <div class="help-text">变量固定为 x，表示源字段（或目标字段本身）。</div>
+                </div>
+                <div class="field">
+                    <label for="assign-episodes">限定 episode (可选)</label>
+                    <input id="assign-episodes" type="text" placeholder="如 0,1,2；留空表示全部">
+                </div>
+            </div>
+
+            <div class="group">
+                <label class="check">
+                    <input id="skip-video-stats" type="checkbox">
+                    保存时跳过视频统计，仍计算 state/action
+                </label>
+                <div class="actions">
+                    <button class="primary" id="run-btn">执行并保存</button>
+                </div>
+                <div id="status" class="status"></div>
+                <div id="progress-box" class="progress-box">
+                    <div class="progress-title" id="progress-title">准备中</div>
+                    <div class="progress-detail" id="progress-detail"></div>
+                    <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+                    <div class="progress-meta" id="progress-meta">0%</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="result">
+            <h2>字段列表</h2>
+            <div id="stat-row" class="stat-row"></div>
+            <div id="fields-panel">
+                <div class="empty">点击"加载字段列表"查看数据集字段</div>
+            </div>
+        </section>
+    </main>
+
+    <div class="modal-backdrop" id="browse-modal">
+        <div class="modal">
+            <h3 id="browse-title">选择目录</h3>
+            <div class="current" id="browse-current">/</div>
+            <div class="field">
+                <input type="text" id="browse-input" placeholder="输入路径后按回车跳转">
+            </div>
+            <div class="dir-list" id="browse-list"></div>
+            <div class="actions">
+                <button class="secondary" id="browse-cancel" type="button">取消</button>
+                <button class="primary" id="browse-ok" type="button">选择此目录</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/field_editor.js"></script>
+</body>
+</html>
