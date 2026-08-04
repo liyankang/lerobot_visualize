@@ -87,6 +87,9 @@ document.querySelectorAll('.tab').forEach((tab) => {
         $(`pane-${activeTab}`).classList.add('active');
         // 赋值模式下根据 mode 显隐字段
         if (activeTab === 'assign') updateAssignModeFields();
+        // 切换 Tab 时隐藏旧预览面板
+        const panel = $('dry-run-panel');
+        if (panel) panel.style.display = 'none';
     });
 });
 
@@ -201,7 +204,263 @@ function renderFeatures(data) {
     `;
 }
 
-// ───────────────── 执行 ─────────────────
+// ───────────────── Dry-run 预览 ─────────────────
+
+function buildBodyForActiveTab() {
+    const inputPath = $('input-path').value.trim();
+    if (!inputPath) throw new Error('请先填写输入数据集路径');
+    const common = { input_path: inputPath };
+    switch (activeTab) {
+        case 'rename': {
+            const renames = collectRenames();
+            if (!renames.length) throw new Error('请至少填写一组重命名规则');
+            return { ...common, renames, rename_names: $('rename-names').checked };
+        }
+        case 'add': {
+            const name = $('add-name').value.trim();
+            if (!name) throw new Error('请填写字段名');
+            const shapeN = parseInt($('add-shape').value, 10) || 1;
+            return {
+                ...common,
+                field_name: name,
+                dtype: $('add-dtype').value,
+                shape: [shapeN],
+                default: parseValueList($('add-default').value) ?? 0,
+                names: ($('add-names').value.trim() || undefined)
+                    ? $('add-names').value.trim().split(',').map((s) => s.trim())
+                    : undefined,
+            };
+        }
+        case 'delete': {
+            const names = $('delete-names').value
+                .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+            if (!names.length) throw new Error('请填写至少一个要删除的字段名');
+            return {
+                ...common,
+                field_names: names,
+                allow_delete_protected: $('allow-delete-protected').checked,
+            };
+        }
+        case 'assign': {
+            const target = $('assign-target').value.trim();
+            if (!target) throw new Error('请填写目标字段');
+            const mode = $('assign-mode').value;
+            const body = {
+                ...common,
+                target,
+                mode,
+                episode_indices: parseEpisodeIndices($('assign-episodes').value),
+            };
+            if (mode === 'constant') body.value = parseValueList($('assign-value').value) ?? 0;
+            if (mode === 'copy') body.source = $('assign-source').value.trim();
+            if (mode === 'expr') {
+                body.expression = $('assign-expr').value.trim();
+                body.source = $('assign-source').value.trim() || undefined;
+            }
+            return body;
+        }
+        default:
+            throw new Error('未知操作');
+    }
+}
+
+const DRY_RUN_URL = {
+    rename: '/api/field_editor/preview_rename',
+    add: '/api/field_editor/preview_add',
+    delete: '/api/field_editor/preview_delete',
+    assign: '/api/field_editor/preview_assign',
+};
+
+function fmtSample(v) {
+    if (v === null || v === undefined) return '';
+    if (Array.isArray(v)) return '[' + v.map(esc).join(', ') + ']';
+    return esc(v);
+}
+
+function renderFeaturesTable(features, extraRowClass = (() => (f) => '')) {
+    if (!features || !features.length) {
+        return '<div class="empty">无字段</div>';
+    }
+    const rows = features.map((f) => {
+        const shapeStr = (f.shape || []).join('×') || '-';
+        const dim = (f.shape || []).length ? f.shape[f.shape.length - 1] : 1;
+        const badges = [];
+        if (f.protected) badges.push('<span class="badge badge-protected">训练必需</span>');
+        if (f.is_image) badges.push('<span class="badge badge-image">image/video</span>');
+        if (dim > 1) badges.push(`<span class="badge badge-vector">vector(${dim})</span>`);
+        else badges.push('<span class="badge badge-scalar">scalar</span>');
+        const namesStr = (f.names && f.names.length) ? esc(f.names.join(', ')) : '';
+        const sampleStr = fmtSample(f.sample);
+        const rowCls = typeof extraRowClass === 'function' ? extraRowClass(f) : '';
+        return `
+            <tr class="${rowCls}">
+                <td class="key-cell">${esc(f.key)}</td>
+                <td>${badges.join(' ')}</td>
+                <td>${esc(f.dtype || '-')}</td>
+                <td>${shapeStr}</td>
+                <td class="sample-cell">${namesStr || '-'}</td>
+                <td class="sample-cell">${sampleStr}</td>
+            </tr>
+        `;
+    }).join('');
+    return `
+        <table class="fields">
+            <thead>
+                <tr>
+                    <th>字段名</th><th>类型</th><th>dtype</th><th>shape</th>
+                    <th>维度名</th><th>样例值</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        </table>
+    `;
+}
+
+function renderRenameDiff(result) {
+    const applied = result.applied || [];
+    const skipped = result.skipped || [];
+    const beforeKeys = new Set((result.fields_before || []).map((f) => f.key));
+    const afterKeys = new Set((result.fields_after || []).map((f) => f.key));
+    const renameMap = new Map(applied.map((r) => [r.old, r.new]));
+    const rowClass = (f) => {
+        if (!beforeKeys.has(f.key) && afterKeys.has(f.key)) return 'diff-add';
+        if (beforeKeys.has(f.key) && !afterKeys.has(f.key)) return 'diff-del';
+        return 'diff-keep';
+    };
+    const afterTable = renderFeaturesTable(result.fields_after || [], rowClass);
+
+    const lines = [];
+    if (applied.length) {
+        lines.push(`✓ 将重命名 ${applied.length} 个字段：`);
+        applied.forEach((r) => {
+            lines.push(`  ${r.old} → ${r.new}  (影响 ${r.episodes_affected} 个 episode)`);
+        });
+    }
+    if (skipped.length) {
+        lines.push(`⚠ 跳过 ${skipped.length} 项：`);
+        skipped.forEach((s) => lines.push(`  ${s.old} → ${s.new}：${s.reason}`));
+    }
+    const summaryCls = skipped.length ? 'has-skip' : '';
+
+    return `
+        <div class="dry-run-summary ${summaryCls}">${esc(lines.join('\n'))}</div>
+        <h4 style="font-size:12px;color:#52616d;margin:10px 0 6px;">重命名后的字段列表（绿色=新增/改名，红色=将被删除的旧名）</h4>
+        ${afterTable}
+    `;
+}
+
+function renderAddDiff(result) {
+    const field = result.field || '?';
+    const sampleRows = result.sample_rows || [];
+    const isVector = !!result.is_vector;
+    const lines = [];
+    lines.push(`✓ 将添加字段 ${field}`);
+    lines.push(`  dtype=${result.dtype || '-'}, shape=[${(result.shape || []).join(',') || '?'}], ` +
+        `${isVector ? '向量' : '标量'}`);
+    lines.push(`  将在 ${result.rows_added || 0} 行填充默认值`);
+
+    const sampleHtml = sampleRows.length
+        ? sampleRows.map(fmtSample).join('<br>')
+        : '<span class="sample-empty">无样例</span>';
+
+    return `
+        <div class="dry-run-summary">${esc(lines.join('\n'))}</div>
+        <div class="sample-compare">
+            <div class="sample-block after">
+                <h4>新字段 ${esc(field)} 样例</h4>
+                <div class="sample-list">${sampleHtml}</div>
+            </div>
+        </div>
+        <h4 style="font-size:12px;color:#52616d;margin:10px 0 6px;">添加后的字段列表（绿色=新增）</h4>
+        ${renderFeaturesTable(result.fields_after || [],
+            (f) => (f.key === field ? 'diff-add' : 'diff-keep'))}
+    `;
+}
+
+function renderDeleteDiff(result) {
+    const deleted = result.deleted || [];
+    const skipped = result.skipped || [];
+    const lines = [];
+    if (deleted.length) {
+        lines.push(`✓ 将删除 ${deleted.length} 个字段：`);
+        deleted.forEach((d) => lines.push(`  ${d.field}  (影响 ${d.episodes_affected} 个 episode)`));
+    }
+    if (skipped.length) {
+        lines.push(`⚠ 跳过 ${skipped.length} 项：`);
+        skipped.forEach((s) => lines.push(`  ${s.field}：${s.reason}`));
+    }
+    const summaryCls = skipped.length ? 'has-skip' : (deleted.length ? '' : 'has-err');
+
+    return `
+        <div class="dry-run-summary ${summaryCls}">${esc(lines.join('\n'))}</div>
+        <h4 style="font-size:12px;color:#52616d;margin:10px 0 6px;">删除后的字段列表（红色=已删除）</h4>
+        ${renderFeaturesTable(result.fields_after || [])}
+    `;
+}
+
+function renderAssignDiff(result) {
+    const target = result.target || '?';
+    const before = result.before_rows || [];
+    const after = result.after_rows || [];
+    const lines = [];
+    lines.push(`✓ 将对字段 ${target} 批量赋值`);
+    lines.push(`  模式: ${result.mode}`);
+    lines.push(`  影响 ${result.episodes_changed || 0} 个 episode，共 ${result.rows_changed || 0} 行`);
+    const summaryCls = (result.episodes_changed || 0) === 0 ? 'has-err' : '';
+
+    const beforeHtml = before.length ? before.map(fmtSample).join('<br>') : '<span class="sample-empty">无数据</span>';
+    const afterHtml = after.length ? after.map(fmtSample).join('<br>') : '<span class="sample-empty">无数据</span>';
+
+    return `
+        <div class="dry-run-summary ${summaryCls}">${esc(lines.join('\n'))}</div>
+        <div class="sample-compare">
+            <div class="sample-block before">
+                <h4>修改前 ${esc(target)} (前3行)</h4>
+                <div class="sample-list">${beforeHtml}</div>
+            </div>
+            <div class="sample-block after">
+                <h4>修改后 ${esc(target)} (前3行)</h4>
+                <div class="sample-list">${afterHtml}</div>
+            </div>
+        </div>
+    `;
+}
+
+const DIFF_RENDERERS = {
+    rename: renderRenameDiff,
+    add: renderAddDiff,
+    delete: renderDeleteDiff,
+    assign: renderAssignDiff,
+};
+
+async function dryRun() {
+    const inputPath = $('input-path').value.trim();
+    if (!inputPath) { status('请先填写输入数据集路径', 'error'); return; }
+    let body, url;
+    try {
+        body = buildBodyForActiveTab();
+        url = DRY_RUN_URL[activeTab];
+    } catch (e) {
+        status(e.message, 'error');
+        return;
+    }
+    setBusy(true);
+    status('正在生成预览...');
+    try {
+        const data = await post(url, body);
+        const panel = $('dry-run-panel');
+        const content = $('dry-run-content');
+        const renderer = DIFF_RENDERERS[activeTab] || (() => `<pre>${esc(JSON.stringify(data.result, null, 2))}</pre>`);
+        content.innerHTML = renderer(data.result || {});
+        panel.style.display = 'block';
+        status(`预览已生成（未写盘）`, 'ok');
+    } catch (e) {
+        status(`预览失败: ${e.message}`, 'error');
+        $('dry-run-panel').style.display = 'none';
+    } finally {
+        setBusy(false);
+    }
+}
 
 function parseValueList(text) {
     const t = (text || '').trim();
@@ -225,74 +484,19 @@ async function run() {
     if (!inputPath) { status('请填写输入数据集路径', 'error'); return; }
     if (!outputPath) { status('请填写输出数据集路径', 'error'); return; }
 
-    const common = {
-        input_path: inputPath,
-        output_path: outputPath,
-        skip_video_stats: $('skip-video-stats').checked,
+    const RUN_URL = {
+        rename: '/api/field_editor/rename',
+        add: '/api/field_editor/add',
+        delete: '/api/field_editor/delete',
+        assign: '/api/field_editor/assign',
     };
 
-    let url = '';
-    let body = {};
+    let body, url;
     try {
-        switch (activeTab) {
-            case 'rename': {
-                const renames = collectRenames();
-                if (!renames.length) throw new Error('请至少填写一组重命名规则');
-                url = '/api/field_editor/rename';
-                body = { ...common, renames, rename_names: $('rename-names').checked };
-                break;
-            }
-            case 'add': {
-                const name = $('add-name').value.trim();
-                if (!name) throw new Error('请填写字段名');
-                const shapeN = parseInt($('add-shape').value, 10) || 1;
-                url = '/api/field_editor/add';
-                body = {
-                    ...common,
-                    field_name: name,
-                    dtype: $('add-dtype').value,
-                    shape: [shapeN],
-                    default: parseValueList($('add-default').value) ?? 0,
-                    names: ($('add-names').value.trim() || undefined)
-                        ? $('add-names').value.trim().split(',').map((s) => s.trim())
-                        : undefined,
-                };
-                break;
-            }
-            case 'delete': {
-                const names = $('delete-names').value
-                    .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-                if (!names.length) throw new Error('请填写至少一个要删除的字段名');
-                url = '/api/field_editor/delete';
-                body = {
-                    ...common,
-                    field_names: names,
-                    allow_delete_protected: $('allow-delete-protected').checked,
-                };
-                break;
-            }
-            case 'assign': {
-                const target = $('assign-target').value.trim();
-                if (!target) throw new Error('请填写目标字段');
-                const mode = $('assign-mode').value;
-                url = '/api/field_editor/assign';
-                body = {
-                    ...common,
-                    target,
-                    mode,
-                    episode_indices: parseEpisodeIndices($('assign-episodes').value),
-                };
-                if (mode === 'constant') body.value = parseValueList($('assign-value').value) ?? 0;
-                if (mode === 'copy') body.source = $('assign-source').value.trim();
-                if (mode === 'expr') {
-                    body.expression = $('assign-expr').value.trim();
-                    body.source = $('assign-source').value.trim() || undefined;
-                }
-                break;
-            }
-            default:
-                throw new Error('未知操作');
-        }
+        body = buildBodyForActiveTab();
+        url = RUN_URL[activeTab];
+        body.output_path = outputPath;
+        body.skip_video_stats = $('skip-video-stats').checked;
     } catch (e) {
         status(e.message, 'error');
         return;
@@ -365,6 +569,7 @@ async function browseTo(path) {
 
 $('preview-btn').addEventListener('click', preview);
 $('run-btn').addEventListener('click', run);
+$('dry-run-btn').addEventListener('click', dryRun);
 
 $('input-browse').addEventListener('click', () => openBrowse('input-path'));
 $('output-browse').addEventListener('click', () => openBrowse('output-path'));

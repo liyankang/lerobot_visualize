@@ -15,6 +15,7 @@ LeRobot 数据集字段编辑工具。
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -68,6 +69,157 @@ def build_preview(editor: Any) -> Dict[str, Any]:
         "total_frames": sum(len(d) for d in editor.episode_data.values()),
         "feature_keys": sorted((editor.info.get("features", {}) or {}).keys()),
     }
+
+
+# ───────────────── Dry-run 预览（不修改原 editor） ─────────────────
+
+def _snapshot_editor(editor: Any) -> Dict[str, Any]:
+    """备份 editor 的可变状态，供 dry-run 后恢复。"""
+    return {
+        "info": copy.deepcopy(editor.info),
+        "episode_data": {
+            ep: df.copy(deep=True) for ep, df in editor.episode_data.items()
+        },
+        "modified": bool(editor.modified),
+    }
+
+
+def _restore_editor(editor: Any, snap: Dict[str, Any]) -> None:
+    """把 editor 恢复到 snapshot 时的状态。"""
+    editor.info = snap["info"]
+    editor.episode_data = snap["episodes"] if "episodes" in snap else snap["episode_data"]
+    editor.modified = snap["modified"]
+
+
+def _sample_rows_after(editor: Any, field_name: str, max_rows: int = 3) -> List[Any]:
+    """取修改后某字段的前若干行样本（向量截断显示）。"""
+    rows = []
+    for ep_idx, df in editor.episode_data.items():
+        if field_name not in df.columns:
+            continue
+        for v in df[field_name].tolist()[:max_rows]:
+            rows.append(_sample_to_json(v))
+        if len(rows) >= max_rows:
+            break
+    return rows[:max_rows]
+
+
+def _sample_to_json(val: Any, max_len: int = 6) -> Any:
+    """把单条样本规范化成 JSON 可序列化的值（向量截断）。"""
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple, np.ndarray)):
+        lst = _to_list(val)
+        if len(lst) > max_len:
+            return [round(float(x), 4) for x in lst[:max_len]] + ["..."]
+        return [round(float(x), 4) for x in lst]
+    try:
+        return round(float(val), 4)
+    except (TypeError, ValueError):
+        return str(val)[:60]
+
+
+def preview_rename(editor: Any, renames: List[Tuple[str, str]], *, rename_names: bool = True) -> Dict[str, Any]:
+    """dry-run：在 editor 副本上执行重命名，返回变更摘要和样例对比。
+
+    返回结构:
+      {
+        "applied": [{old, new, episodes_affected}],
+        "skipped": [{old, new, reason}],
+        "fields_before": [...],
+        "fields_after": [...],
+      }
+    """
+    snap = _snapshot_editor(editor)
+    try:
+        result = apply_rename(editor, renames, rename_names=rename_names)
+        return {
+            "applied": result["applied"],
+            "skipped": result["skipped"],
+            "fields_before": snap_features(snap),
+            "fields_after": list_features(editor),
+        }
+    finally:
+        _restore_editor(editor, snap)
+
+
+def preview_add(editor: Any, field_name: str, *, dtype: str = "float32", shape: Optional[List[int]] = None, default: Any = 0.0, names: Optional[List[str]] = None) -> Dict[str, Any]:
+    """dry-run：在 editor 副本上执行添加字段，返回变更摘要和新字段的样例值。"""
+    snap = _snapshot_editor(editor)
+    try:
+        result = apply_add(
+            editor, field_name,
+            dtype=dtype, shape=shape, default=default, names=names,
+        )
+        result["sample_rows"] = _sample_rows_after(editor, field_name)
+        result["fields_before"] = snap_features(snap)
+        result["fields_after"] = list_features(editor)
+        return result
+    finally:
+        _restore_editor(editor, snap)
+
+
+def preview_delete(editor: Any, field_names: List[str], *, allow_delete_protected: bool = False) -> Dict[str, Any]:
+    """dry-run：在 editor 副本上执行删除字段，返回变更摘要。"""
+    snap = _snapshot_editor(editor)
+    try:
+        result = apply_delete(
+            editor, field_names,
+            allow_delete_protected=allow_delete_protected,
+        )
+        result["fields_before"] = snap_features(snap)
+        result["fields_after"] = list_features(editor)
+        return result
+    finally:
+        _restore_editor(editor, snap)
+
+
+def preview_assign(editor: Any, target: str, *, mode: str = "constant", value: Any = None, source: Optional[str] = None, expression: Optional[str] = None, episode_indices: Optional[List[int]] = None) -> Dict[str, Any]:
+    """dry-run：在 editor 副本上执行批量赋值，返回变更摘要和前后样例对比。"""
+    snap = _snapshot_editor(editor)
+    try:
+        before_rows = _sample_rows_after(editor, target, max_rows=3)
+        result = apply_assign(
+            editor, target,
+            mode=mode, value=value, source=source,
+            expression=expression, episode_indices=episode_indices,
+        )
+        result["before_rows"] = before_rows
+        result["after_rows"] = _sample_rows_after(editor, target, max_rows=3)
+        return result
+    finally:
+        _restore_editor(editor, snap)
+
+
+def snap_features(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """从 snapshot（只含 info/episode_data）里重建 features 快照。
+
+    list_features 需要完整 editor，这里给一个最小兼容版。
+    """
+    info = snap.get("info", {})
+    episode_data = snap.get("episode_data", {})
+    features = info.get("features", {}) or {}
+    result = []
+    for key, meta in features.items():
+        entry: Dict[str, Any] = {
+            "key": key,
+            "dtype": meta.get("dtype"),
+            "shape": list(meta.get("shape") or []),
+            "names": _normalize_names(meta.get("names")),
+            "protected": key in PROTECTED_FEATURES,
+            "is_image": str(meta.get("dtype", "")).lower() in ("image", "video"),
+        }
+        try:
+            for df in episode_data.values():
+                if key in df.columns and len(df) > 0:
+                    entry["sample"] = _sample_to_json(df[key].iloc[0])
+                    break
+            else:
+                entry["sample"] = None
+        except Exception:
+            entry["sample"] = None
+        result.append(entry)
+    return result
 
 
 def parse_rename_pairs(renames: Any) -> List[Tuple[str, str]]:

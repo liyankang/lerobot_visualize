@@ -4397,6 +4397,98 @@ def api_field_editor_preview():
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/field_editor/preview_rename", methods=["POST"])
+def api_field_editor_preview_rename():
+    """dry-run：预览重命名效果，不写盘。"""
+    try:
+        data = request.get_json() or {}
+        editor = _load_field_editor(data)
+        renames = field_editor.parse_rename_pairs(data.get("renames"))
+        if not renames:
+            return jsonify({"error": "未提供有效的重命名规则"}), 400
+        result = field_editor.preview_rename(
+            editor, renames,
+            rename_names=bool(data.get("rename_names", True)),
+        )
+        return jsonify({"success": True, "result": result})
+    except Exception as e:
+        log.exception("重命名预览失败")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/field_editor/preview_add", methods=["POST"])
+def api_field_editor_preview_add():
+    """dry-run：预览添加字段效果，不写盘。"""
+    try:
+        data = request.get_json() or {}
+        editor = _load_field_editor(data)
+        shape_raw = data.get("shape")
+        if shape_raw in ("", None):
+            shape = None
+        elif isinstance(shape_raw, list):
+            shape = [int(x) for x in shape_raw if x not in ("", None)]
+        else:
+            shape = [int(shape_raw)]
+        result = field_editor.preview_add(
+            editor,
+            str(data.get("field_name", "")).strip(),
+            dtype=str(data.get("dtype", "float32") or "float32"),
+            shape=shape,
+            default=data.get("default", 0.0),
+            names=data.get("names"),
+        )
+        return jsonify({"success": True, "result": result})
+    except Exception as e:
+        log.exception("添加字段预览失败")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/field_editor/preview_delete", methods=["POST"])
+def api_field_editor_preview_delete():
+    """dry-run：预览删除字段效果，不写盘。"""
+    try:
+        data = request.get_json() or {}
+        editor = _load_field_editor(data)
+        field_names = data.get("field_names") or []
+        if isinstance(field_names, str):
+            field_names = [field_names]
+        if not field_names:
+            return jsonify({"error": "未指定要删除的字段"}), 400
+        result = field_editor.preview_delete(
+            editor,
+            [str(f).strip() for f in field_names if str(f).strip()],
+            allow_delete_protected=bool(data.get("allow_delete_protected", False)),
+        )
+        return jsonify({"success": True, "result": result})
+    except Exception as e:
+        log.exception("删除字段预览失败")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/field_editor/preview_assign", methods=["POST"])
+def api_field_editor_preview_assign():
+    """dry-run：预览批量赋值效果，不写盘。"""
+    try:
+        data = request.get_json() or {}
+        editor = _load_field_editor(data)
+        ep_indices = data.get("episode_indices")
+        if ep_indices and isinstance(ep_indices, list):
+            ep_indices = [int(i) for i in ep_indices]
+        result = field_editor.preview_assign(
+            editor,
+            str(data.get("target", "")).strip(),
+            mode=str(data.get("mode", "constant") or "constant"),
+            value=data.get("value"),
+            source=data.get("source"),
+            expression=data.get("expression"),
+            episode_indices=ep_indices,
+        )
+        return jsonify({"success": True, "result": result})
+    except Exception as e:
+        log.exception("赋值预览失败")
+        return jsonify({"error": str(e)}), 400
+
+
 @app.route("/api/field_editor/rename", methods=["POST"])
 def api_field_editor_rename():
     """重命名字段并保存到新目录。"""

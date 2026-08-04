@@ -174,8 +174,42 @@
         }
         .dir-item:hover { background: #eaf2ff; }
         .dir-item.parent { color: #1f7aec; font-weight: 650; }
+        .dry-run-panel {
+            margin-top: 18px; border-top: 1px dashed #d9e3ec; padding-top: 6px;
+        }
+        .dry-run-summary {
+            background: #f6f8fa; border: 1px solid #e2e7ec; border-radius: 6px;
+            padding: 10px 12px; margin-bottom: 12px; font-size: 12px; color: #37474f;
+            line-height: 1.6; white-space: pre-line;
+        }
+        .dry-run-summary.has-skip { border-color: #ffd8a8; background: #fff8ee; }
+        .dry-run-summary.has-err { border-color: #f5c2c0; background: #fff1f0; }
+        .sample-compare {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 8px 0 14px;
+        }
+        .sample-block {
+            border: 1px solid #e2e7ec; border-radius: 6px; padding: 10px;
+            background: #fafbfc; font-size: 12px;
+        }
+        .sample-block h4 {
+            font-size: 11px; color: #52616d; margin-bottom: 6px;
+            text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        .sample-block.before { border-left: 3px solid #b0bec5; }
+        .sample-block.after { border-left: 3px solid #1f7aec; }
+        .sample-list {
+            font-family: Consolas, monospace; font-size: 11px; color: #263238;
+            word-break: break-all;
+        }
+        .sample-empty { color: #90a4ae; font-style: italic; }
+        tr.diff-add { background: #ecfdf3; }
+        tr.diff-del { background: #fff1f0; }
+        tr.diff-keep { opacity: 0.75; }
+        .key-cell .old-name { text-decoration: line-through; color: #b42318; }
+        .key-cell .new-name { color: #067647; font-weight: 700; }
         @media (max-width: 940px) {
             main { grid-template-columns: 1fr; padding: 14px; }
+            .sample-compare { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -313,6 +347,7 @@
                     保存时跳过视频统计，仍计算 state/action
                 </label>
                 <div class="actions">
+                    <button class="secondary" id="dry-run-btn">预览效果</button>
                     <button class="primary" id="run-btn">执行并保存</button>
                 </div>
                 <div id="status" class="status"></div>
@@ -330,6 +365,10 @@
             <div id="stat-row" class="stat-row"></div>
             <div id="fields-panel">
                 <div class="empty">点击"加载字段列表"查看数据集字段</div>
+            </div>
+            <div id="dry-run-panel" class="dry-run-panel" style="display:none;">
+                <h3 style="font-size:14px;margin:18px 0 10px;">预览效果（dry-run，未写盘）</h3>
+                <div id="dry-run-content"></div>
             </div>
         </section>
     </main>
