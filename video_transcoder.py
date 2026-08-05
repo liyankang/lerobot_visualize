@@ -210,34 +210,43 @@ def transcode_one(
     if extra_args:
         args += list(extra_args)
 
+    # 如果 src == dst（原地覆盖场景），先转码到临时文件再替换，
+    # 否则 ffmpeg 会因为输入输出相同而拒绝。
+    in_place = src_p.resolve() == dst_p.resolve()
+    actual_dst = dst_p.with_suffix(dst_p.suffix + ".transcoding") if in_place else dst_p
+
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     cmd += ["-i", str(src_p)]
     cmd += ["-c:v", encoder] + args
     if not keep_audio:
         cmd += ["-an"]
     cmd += ["-movflags", "+faststart"]
-    cmd += [str(dst_p)]
+    cmd += [str(actual_dst)]
 
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
         if r.returncode != 0:
             # 清理半成品
-            dst_p.unlink(missing_ok=True)
+            actual_dst.unlink(missing_ok=True)
             err_tail = (r.stderr or "").strip().splitlines()[-3:]
             return {
                 "ok": False, "src": src, "dst": dst,
                 "codec_before": codec_before,
                 "error": "ffmpeg 失败: " + " | ".join(err_tail),
             }
+        # 原地覆盖：用临时文件替换原文件
+        if in_place:
+            actual_dst.replace(dst_p)
     except FileNotFoundError:
+        actual_dst.unlink(missing_ok=True)
         return {"ok": False, "src": src, "dst": dst,
                 "error": "未找到 ffmpeg，请先安装"}
     except subprocess.TimeoutExpired:
-        dst_p.unlink(missing_ok=True)
+        actual_dst.unlink(missing_ok=True)
         return {"ok": False, "src": src, "dst": dst,
                 "codec_before": codec_before, "error": "转码超时"}
     except Exception as e:
-        dst_p.unlink(missing_ok=True)
+        actual_dst.unlink(missing_ok=True)
         return {"ok": False, "src": src, "dst": dst,
                 "codec_before": codec_before, "error": str(e)}
 
