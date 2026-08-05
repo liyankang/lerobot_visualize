@@ -17,6 +17,7 @@
 | **数据集健康度评分** | `/health-check` | **一键体检 7 大维度，生成 0-100 综合评分与问题清单** |
 | 批量数据裁剪 | `/batch-tools` | 按 episode 长度删除过短/过长数据，裁掉静止帧 |
 | 字段编辑器 | `/field-editor` | 批量重命名/添加/删除字段，以及对字段批量赋值（常量/复制/表达式） |
+| 视频编码转换 | `/video-codec` | 扫描视频编码，批量转码到 AV1/H.264 统一编码，避免 merge 拼接时损坏，同步更新 info.json |
 | Stats 准确性校验 | `/verify-stats` | 重算 per-feature 统计量与 stats.json 交叉比对 |
 
 ---

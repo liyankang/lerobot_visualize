@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>视频编码转换 - LeRobot 工具箱</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f4f6f8; color: #263238; min-height: 100vh;
+        }
+        header {
+            height: 52px; background: #17202a; color: #eef3f7;
+            display: flex; align-items: center; gap: 16px; padding: 0 22px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.22);
+        }
+        header a { color: #b8c4ce; text-decoration: none; font-size: 13px; }
+        header a:hover { color: #fff; }
+        header h1 { font-size: 16px; font-weight: 650; }
+        main {
+            max-width: 1280px; margin: 0 auto; padding: 22px;
+            display: grid; grid-template-columns: 460px 1fr; gap: 18px;
+        }
+        section {
+            background: #fff; border: 1px solid #e2e7ec; border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(20,40,60,0.05);
+        }
+        .form { padding: 18px; max-height: calc(100vh - 110px); overflow-y: auto; }
+        .form h2, .result h2 { font-size: 15px; margin-bottom: 14px; }
+        .group { border-top: 1px solid #edf1f4; padding-top: 14px; margin-top: 14px; }
+        .group:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+        label { display: block; font-size: 12px; font-weight: 650; color: #52616d; margin-bottom: 6px; }
+        input[type="text"], input[type="number"], select {
+            width: 100%; padding: 7px 10px; border: 1px solid #cfd8df;
+            border-radius: 6px; font-size: 13px; color: #263238; background: #fff;
+        }
+        input { height: 34px; }
+        input:focus, select:focus {
+            outline: none; border-color: #1f7aec; box-shadow: 0 0 0 2px rgba(31,122,236,0.12);
+        }
+        .field { margin-bottom: 12px; }
+        .path-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+        .browse-icon {
+            height: 34px; width: 38px; padding: 0; border: 1px solid #cfd8df;
+            border-radius: 6px; background: #fff; cursor: pointer; font-size: 16px;
+            display: flex; align-items: center; justify-content: center; color: #52616d;
+        }
+        .browse-icon:hover { background: #f0f4f8; border-color: #1f7aec; color: #1f7aec; }
+        .check {
+            display: flex; align-items: center; gap: 8px; margin: 4px 0 12px;
+            font-size: 13px; color: #37474f;
+        }
+        .check input { width: 16px; height: 16px; }
+        .actions { display: flex; gap: 10px; margin-top: 16px; }
+        button {
+            height: 34px; padding: 0 14px; border: 0; border-radius: 6px;
+            font-size: 13px; font-weight: 650; cursor: pointer;
+        }
+        .primary { background: #1f7aec; color: #fff; }
+        .secondary { background: #e8edf2; color: #263238; }
+        button:disabled { opacity: 0.55; cursor: not-allowed; }
+        .result { padding: 18px; min-height: 540px; }
+        .stat-row { display: flex; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
+        .stat-chip {
+            border: 1px solid #e2e7ec; border-radius: 7px; padding: 8px 14px;
+            background: #fafbfc; font-size: 12px; color: #52616d;
+        }
+        .stat-chip b { display: block; color: #263238; font-size: 16px; margin-bottom: 2px; }
+        .codec-badge {
+            display: inline-block; padding: 2px 10px; border-radius: 10px;
+            font-size: 11px; font-weight: 700; font-family: Consolas, monospace;
+        }
+        .codec-av1 { background: #f3e5f5; color: #7b1fa2; }
+        .codec-h264 { background: #e3f2fd; color: #1565c0; }
+        .codec-h265 { background: #fce4ec; color: #c2185b; }
+        .codec-other { background: #eceff1; color: #455a64; }
+        .codec-mismatch { background: #fff3e0; color: #e65100; }
+        table.videos { width: 100%; border-collapse: collapse; font-size: 12px; }
+        table.videos th, table.videos td {
+            padding: 7px 10px; border-bottom: 1px solid #edf1f4; text-align: left;
+            vertical-align: top;
+        }
+        table.videos th {
+            background: #f6f8fa; color: #52616d; font-weight: 650;
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        td.path-cell {
+            font-family: Consolas, monospace; font-size: 11px;
+            word-break: break-all; max-width: 320px;
+        }
+        .empty { color: #78909c; font-size: 13px; padding: 18px 0; }
+        .warn-banner {
+            padding: 12px 14px; background: #fff8e1; border: 1px solid #ffe082;
+            border-radius: 6px; font-size: 13px; color: #8d6e00; line-height: 1.6;
+            margin-bottom: 14px; display: none;
+        }
+        .warn-banner.show { display: block; }
+        .status {
+            margin-top: 14px; padding: 10px 12px; border-radius: 6px;
+            background: #eef6ff; color: #145ea8; font-size: 13px; display: none;
+            white-space: pre-line;
+        }
+        .status.error { background: #fff1f0; color: #b42318; }
+        .status.ok { background: #ecfdf3; color: #067647; }
+        .progress-box {
+            display: none; margin-top: 14px; border: 1px solid #d9e3ec;
+            border-radius: 8px; background: #fafcff; padding: 12px;
+        }
+        .progress-title { font-size: 13px; font-weight: 700; color: #263238; }
+        .progress-detail { font-size: 12px; color: #60717f; margin-top: 4px; min-height: 18px; }
+        .progress-track {
+            margin-top: 10px; height: 10px; border-radius: 999px;
+            background: #e7edf3; overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%; width: 0%; background: #1f7aec; transition: width 0.2s ease;
+        }
+        .progress-meta { font-size: 11px; color: #60717f; margin-top: 6px; text-align: right; }
+        .help-text { font-size: 11px; color: #78909c; margin-top: 4px; line-height: 1.5; }
+        .ffmpeg-status {
+            padding: 8px 12px; border-radius: 6px; font-size: 12px; margin-bottom: 12px;
+            display: flex; gap: 14px; align-items: center;
+        }
+        .ffmpeg-ok { background: #ecfdf3; color: #067647; }
+        .ffmpeg-err { background: #fff1f0; color: #b42318; }
+        .modal-backdrop {
+            display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.46);
+            z-index: 1000; align-items: center; justify-content: center; padding: 18px;
+        }
+        .modal-backdrop.active { display: flex; }
+        .modal {
+            width: min(760px, 96vw); max-height: 86vh; background: #fff;
+            border-radius: 8px; border: 1px solid #d9e3ec; padding: 16px;
+            display: flex; flex-direction: column; box-shadow: 0 18px 50px rgba(0,0,0,0.22);
+        }
+        .modal h3 { font-size: 15px; margin-bottom: 10px; }
+        .current {
+            font-family: Consolas, monospace; font-size: 12px; color: #52616d;
+            background: #f6f8fa; border: 1px solid #e2e7ec; border-radius: 6px;
+            padding: 8px; margin-bottom: 10px; word-break: break-all;
+        }
+        .dir-list {
+            min-height: 220px; max-height: 430px; overflow: auto; border: 1px solid #e2e7ec;
+            border-radius: 6px; background: #fbfcfd; padding: 6px;
+        }
+        .dir-item { padding: 8px 10px; border-radius: 5px; cursor: pointer; font-size: 13px; }
+        .dir-item:hover { background: #eaf2ff; }
+        .dir-item.parent { color: #1f7aec; font-weight: 650; }
+        @media (max-width: 940px) {
+            main { grid-template-columns: 1fr; padding: 14px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <a href="/">← 工具箱</a>
+        <h1>视频编码转换</h1>
+    </header>
+
+    <main>
+        <section class="form">
+            <h2>视频编码转换</h2>
+            <div id="ffmpeg-status" class="ffmpeg-status"></div>
+
+            <div class="group">
+                <div class="field">
+                    <label for="input-path">输入数据集路径</label>
+                    <div class="path-row">
+                        <input id="input-path" type="text" placeholder="D:\path\dataset">
+                        <button class="browse-icon" id="input-browse" type="button" title="浏览目录">&#128193;</button>
+                    </div>
+                </div>
+                <div class="field">
+                    <button class="secondary" id="scan-btn" style="width:100%;">扫描视频</button>
+                </div>
+            </div>
+
+            <div class="group">
+                <div class="field">
+                    <label for="output-path">输出数据集路径</label>
+                    <div class="path-row">
+                        <input id="output-path" type="text" placeholder="D:\path\dataset_av1">
+                        <button class="browse-icon" id="output-browse" type="button" title="浏览目录">&#128193;</button>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="target-codec">目标编码</label>
+                    <select id="target-codec">
+                        <option value="av1" selected>AV1 (libsvtav1, 推荐)</option>
+                        <option value="h264">H.264 (libx264, 兼容性最好)</option>
+                        <option value="h265">H.265 / HEVC (libx265)</option>
+                    </select>
+                    <div class="help-text">
+                        AV1: crf 30, preset 12, g=2, yuv420p（压缩率高，兼容性改善中）<br>
+                        H.264: crf 18, preset fast, g=2, yuv420p（兼容性最佳）
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="only-codec">只转码这些编码（可选，逗号分隔）</label>
+                    <input id="only-codec" type="text" placeholder="留空=全部非目标编码；填 h264 表示只转 h264 的视频">
+                </div>
+                <label class="check">
+                    <input id="skip-verify" type="checkbox">
+                    跳过转码后校验（更快，但不检查损坏）
+                </label>
+            </div>
+
+            <div class="actions">
+                <button class="primary" id="run-btn">开始转码</button>
+            </div>
+            <div id="status" class="status"></div>
+            <div id="progress-box" class="progress-box">
+                <div class="progress-title" id="progress-title">准备中</div>
+                <div class="progress-detail" id="progress-detail"></div>
+                <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+                <div class="progress-meta" id="progress-meta">0%</div>
+            </div>
+        </section>
+
+        <section class="result">
+            <h2>视频清单</h2>
+            <div id="warn-banner" class="warn-banner"></div>
+            <div id="stat-row" class="stat-row"></div>
+            <div id="videos-panel">
+                <div class="empty">点击"扫描视频"查看数据集所有视频的编码信息</div>
+            </div>
+        </section>
+    </main>
+
+    <div class="modal-backdrop" id="browse-modal">
+        <div class="modal">
+            <h3 id="browse-title">选择目录</h3>
+            <div class="current" id="browse-current">/</div>
+            <div class="field">
+                <input type="text" id="browse-input" placeholder="输入路径后按回车跳转">
+            </div>
+            <div class="dir-list" id="browse-list"></div>
+            <div class="actions">
+                <button class="secondary" id="browse-cancel" type="button">取消</button>
+                <button class="primary" id="browse-ok" type="button">选择此目录</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/video_codec.js"></script>
+</body>
+</html>

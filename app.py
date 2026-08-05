@@ -41,6 +41,7 @@ except ImportError:
 import image_analyzer as img_analyzer
 import dataset_batch_tools as batch_tools
 import dataset_field_editor as field_editor
+import video_transcoder
 from training_check_service import TrainingCheckService
 from stats_verify_service import StatsVerifyService
 from health_check_service import HealthCheckService
@@ -2282,7 +2283,7 @@ class DatasetEditor:
         encoder_map = {
             "h264": "libx264", "hevc": "libx265", "h265": "libx265",
             "vp8": "libvpx", "vp9": "libvpx-vp9",
-            "av1": "libx264",
+            "av1": "libsvtav1",
         }
         encoder = encoder_map.get(codec_name, "libx264")
 
@@ -2299,9 +2300,15 @@ class DatasetEditor:
         ]
         if bit_rate:
             cmd += ["-b:v", str(bit_rate)]
+        elif encoder == "libsvtav1":
+            cmd += ["-crf", "30"]
         else:
             cmd += ["-crf", "18"]
         if encoder == "libx264":
+            cmd += ["-preset", "fast"]
+        elif encoder == "libsvtav1":
+            cmd += ["-preset", "12"]
+        elif encoder == "libx265":
             cmd += ["-preset", "fast"]
         cmd += ["-movflags", "+faststart", "-an", dst_path]
 
@@ -3494,6 +3501,11 @@ def field_editor_page():
     return render_template("field_editor.html")
 
 
+@app.route("/video-codec")
+def video_codec_page():
+    return render_template("video_codec.html")
+
+
 @app.route("/image-analysis")
 def image_analysis_page():
     return render_template("image_analysis.html")
@@ -4551,6 +4563,95 @@ def api_field_editor_rename_names():
     except Exception as e:
         set_save_progress("error", "修改维度名失败", str(e), 0, 0, False)
         log.exception("修改维度名失败")
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════ 视频编码转换 API ═══════════════════════
+
+@app.route("/api/video_transcode/ffmpeg_info", methods=["GET"])
+def api_video_transcode_ffmpeg_info():
+    """检测 ffmpeg / ffprobe 是否可用以及支持的编码器。"""
+    info = {"ffmpeg": False, "ffprobe": False, "encoders": []}
+    for exe in ("ffmpeg", "ffprobe"):
+        try:
+            subprocess.run([exe, "-version"], capture_output=True, timeout=5)
+            info[exe] = True
+        except FileNotFoundError:
+            info[exe] = False
+        except Exception:
+            info[exe] = False
+    if info["ffmpeg"]:
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True, text=True, timeout=5,
+            )
+            txt = r.stdout or ""
+            info["encoders"] = sorted(
+                {
+                    "libsvtav1" if "libsvtav1" in txt else None,
+                    "libaom-av1" if "libaom-av1" in txt else None,
+                    "libx264" if "libx264" in txt else None,
+                    "libx265" if "libx265" in txt else None,
+                } - {None}
+            )
+        except Exception:
+            info["encoders"] = []
+    return jsonify({"success": True, **info})
+
+
+@app.route("/api/video_transcode/scan", methods=["POST"])
+def api_video_transcode_scan():
+    """扫描数据集视频，返回每个视频的编码/分辨率/帧数等。"""
+    try:
+        data = request.get_json() or {}
+        path = Path(str(data.get("input_path", "")).strip())
+        if not path.exists():
+            return jsonify({"error": f"路径不存在: {path}"}), 400
+        result = video_transcoder.scan_dataset_videos(path)
+        return jsonify({"success": True, **result})
+    except Exception as e:
+        log.exception("视频扫描失败")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/video_transcode/run", methods=["POST"])
+def api_video_transcode_run():
+    """批量转码数据集视频到目标编码。"""
+    data = request.get_json() or {}
+    output_path = str(data.get("output_path", "")).strip()
+    if not output_path:
+        return jsonify({"error": "请指定输出数据集路径"}), 400
+    try:
+        input_path = Path(str(data.get("input_path", "")).strip()).resolve()
+        out_path = Path(output_path).resolve()
+        if input_path == out_path:
+            return jsonify({"error": "输出路径不能和输入路径相同，请另存为新目录"}), 400
+
+        target_codec = str(data.get("target_codec", "av1") or "av1").lower()
+        only_codec = data.get("only_codec")
+        if only_codec and isinstance(only_codec, str):
+            only_codec = [only_codec]
+        extra_args = data.get("extra_args")
+
+        set_save_progress("prepare", "准备转码", f"目标编码: {target_codec}", 0, 1, True)
+        result = video_transcoder.transcode_dataset(
+            input_path,
+            out_path,
+            target_codec,
+            only_codec=only_codec,
+            extra_args=extra_args,
+            skip_verify=bool(data.get("skip_verify", False)),
+            progress_cb=set_save_progress,
+        )
+        set_save_progress("done", "转码完成",
+                          f"成功 {result['transcoded']}/{result['total']}"
+                          f"（跳过 {result['skipped']}，失败 {result['failed']}）",
+                          1, 1, False)
+        return jsonify({"success": True, **result})
+    except Exception as e:
+        set_save_progress("error", "转码失败", str(e), 0, 0, False)
+        log.exception("视频转码失败")
         return jsonify({"error": str(e)}), 500
 
 
